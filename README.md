@@ -138,7 +138,7 @@ Follow the Claude steps in [First-time setup](#1-claude): install Claude Code, t
 Look at the window the start script opened. It prints a line like `YT Music Sorter is running at http://127.0.0.1:8765/`. Copy that address into your browser.
 
 **Port in use.**
-The app uses port 8765, and picks another free one automatically if that one is taken. The address it prints always shows the right one, so use the address from its window. Running the app twice at the same time is not needed. If you do, close the old window first.
+The app uses port 8765, and picks another free one automatically if that one is taken. The address it prints always shows the right one, so use the address from its window. If the app is already running, starting it again only opens the running one in your browser (and the new window closes again).
 
 **The page says "Can't reach the app".**
 The window that runs the app was closed. Start it again with `start.bat` or `./start.sh`.

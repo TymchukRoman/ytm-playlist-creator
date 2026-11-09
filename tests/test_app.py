@@ -649,3 +649,143 @@ def test_update_all_missing_playlist_is_skipped_and_forget_keeps_the_job(env):
     assert [p["playlist_id"] for p in env.client.get("/api/playlists").json()] == ["PL1"]
     assert env.client.post("/api/job/approve", json={"video_ids": ["v0"]}).status_code == 200
     assert env.client.get("/api/job").json()["status"] == "done"
+
+
+# --- one app per data folder -----------------------------------------------------------------
+
+import http.server
+import json
+import os
+import subprocess
+import sys
+
+
+def test_instance_file_is_separate_for_demo(monkeypatch, tmp_path):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    assert launcher.instance_file(demo=False) == tmp_path / "instance.json"
+    assert launcher.instance_file(demo=True) == tmp_path / "demo" / "instance.json"
+
+
+def test_running_instance_url_decision(tmp_path):
+    path = tmp_path / "instance.json"
+    calls = []
+
+    def answers(port):
+        calls.append(port)
+        return port == 9001
+
+    assert launcher.running_instance_url(path, lambda pid: True, answers) is None  # no file
+    path.write_text("not json", encoding="utf-8")
+    assert launcher.running_instance_url(path, lambda pid: True, answers) is None  # corrupt: take over
+    path.write_text(json.dumps({"pid": 4242, "port": 9001}), encoding="utf-8")
+    assert launcher.running_instance_url(path, lambda pid: True, answers) == "http://127.0.0.1:9001/"
+    calls.clear()
+    assert launcher.running_instance_url(path, lambda pid: False, answers) is None  # stale: process gone
+    assert calls == []
+    path.write_text(json.dumps({"pid": 4242, "port": 9002}), encoding="utf-8")
+    assert launcher.running_instance_url(path, lambda pid: True, answers) is None  # pid reused, port silent
+    path.write_text(json.dumps({"pid": "x", "port": None}), encoding="utf-8")
+    assert launcher.running_instance_url(path, lambda pid: True, lambda port: True) is None
+
+
+def test_pid_alive():
+    assert launcher.pid_alive(os.getpid()) is True
+    done = subprocess.run([sys.executable, "-c", "pass"])
+    assert done.returncode == 0
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert launcher.pid_alive(proc.pid) is False
+    assert launcher.pid_alive(0) is False and launcher.pid_alive(-5) is False
+
+
+def _serve(body: bytes):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_app_answers_only_for_this_app():
+    ours = _serve(json.dumps({"claude": {}, "youtube": {}, "demo": False}).encode())
+    other = _serve(b'{"hello": "world"}')
+    try:
+        assert launcher.app_answers(ours.server_address[1]) is True
+        assert launcher.app_answers(other.server_address[1]) is False
+    finally:
+        ours.shutdown()
+        other.shutdown()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    assert launcher.app_answers(closed, timeout=2) is False
+
+
+def test_second_start_opens_the_running_app_and_exits(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("YTSORTER_DEMO", raising=False)
+    monkeypatch.delenv("YTSORTER_NO_BROWSER", raising=False)
+    (tmp_path / "instance.json").write_text(json.dumps({"pid": 4242, "port": 9001}), encoding="utf-8")
+    monkeypatch.setattr(launcher, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(launcher, "app_answers", lambda port: port == 9001)
+    opened = []
+    monkeypatch.setattr(launcher.webbrowser, "open", lambda url: opened.append(url) or True)
+
+    def no_server(*a, **k):
+        raise AssertionError("a second server must not start")
+
+    monkeypatch.setattr(launcher.uvicorn, "Server", no_server)
+    monkeypatch.setattr(launcher, "build_default_app", no_server)
+    launcher.main()
+    assert "already running at http://127.0.0.1:9001/" in capsys.readouterr().out
+    assert opened == ["http://127.0.0.1:9001/"]
+
+    opened.clear()
+    monkeypatch.setenv("YTSORTER_NO_BROWSER", "1")
+    launcher.main()
+    assert "already running at http://127.0.0.1:9001/" in capsys.readouterr().out
+    assert opened == []
+    assert json.loads((tmp_path / "instance.json").read_text(encoding="utf-8")) == {"pid": 4242, "port": 9001}
+
+
+@pytest.mark.parametrize("demo", [False, True])
+def test_main_records_its_instance_and_removes_it_on_shutdown(monkeypatch, tmp_path, demo):
+    seen = {}
+    marker = tmp_path / "demo" / "instance.json" if demo else tmp_path / "instance.json"
+
+    class FakeServer:
+        def __init__(self, config):
+            self.started = False
+
+        def run(self):
+            seen["during"] = json.loads(marker.read_text(encoding="utf-8"))
+
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    if demo:
+        monkeypatch.setenv("YTSORTER_DEMO", "1")
+    else:
+        monkeypatch.delenv("YTSORTER_DEMO", raising=False)
+    monkeypatch.setenv("YTSORTER_NO_BROWSER", "1")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"pid": 4242, "port": 9001}), encoding="utf-8")  # stale
+    monkeypatch.setattr(launcher, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(launcher.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(launcher, "pick_port", lambda preferred=8765: 9999)
+    launcher.main()
+    assert seen["during"] == {"pid": os.getpid(), "port": 9999}
+    assert not marker.exists()
+
+
+def test_shutdown_leaves_another_instances_file_alone(tmp_path):
+    marker = tmp_path / "instance.json"
+    marker.write_text(json.dumps({"pid": 4242, "port": 9001}), encoding="utf-8")
+    launcher.remove_instance(marker)
+    assert marker.exists()
