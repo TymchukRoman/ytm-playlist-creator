@@ -16,6 +16,9 @@ from ytsorter.store import JobStore, RecordStore
 from ytsorter.ytm import YouTubeAuthError
 
 
+BASE = "http://127.0.0.1:8765"
+
+
 def song(vid: str) -> Song:
     return Song(vid, f"Title {vid} «ё»", ["Артист"], "Album", "3:21")
 
@@ -63,7 +66,7 @@ class Env:
                                 run_in_background=lambda fn: fn())
         kwargs = {"clock": clock} if clock else {}
         self.app = create_app(self.runner, self.ytm, self.classifier, self.records, **kwargs)
-        self.client = TestClient(self.app)
+        self.client = TestClient(self.app, base_url=BASE)
 
 
 @pytest.fixture
@@ -367,7 +370,7 @@ def test_unexpected_errors_are_plain_json_without_traceback(env, monkeypatch):
         raise RuntimeError("secret internal detail")
 
     monkeypatch.setattr(env.runner, "start_create", boom)
-    client = TestClient(env.app, raise_server_exceptions=False)
+    client = TestClient(env.app, base_url=BASE, raise_server_exceptions=False)
     r = client.post("/api/playlists", json={"name": "A", "description": "b"})
     assert r.status_code == 500
     assert list(r.json()) == ["error"]
@@ -450,7 +453,7 @@ def test_default_app_demo_mode_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("YTSORTER_DEMO", "1")
     monkeypatch.setattr(demo_data, "BATCH_DELAY", 0)
-    client = TestClient(build_default_app())
+    client = TestClient(build_default_app(), base_url=BASE)
     assert client.get("/api/status").json() == {
         "claude": {"installed": True, "logged_in": True, "message": "ok"},
         "youtube": {"connected": True},
@@ -481,7 +484,122 @@ def test_default_app_demo_mode_end_to_end(monkeypatch, tmp_path):
 def test_default_app_real_mode_uses_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("YTSORTER_DEMO", raising=False)
-    client = TestClient(build_default_app())
+    client = TestClient(build_default_app(), base_url=BASE)
     assert client.get("/api/status").json()["demo"] is False
     assert client.get("/api/status").json()["youtube"] == {"connected": False}
     assert client.get("/api/playlists").json() == []
+
+
+# --- fix round 1: CSRF / DNS rebinding, races, demo reset --------------------------------------------
+
+def test_foreign_host_header_is_rejected(env):
+    r = env.client.get("/api/status", headers={"host": "evil.example"})
+    assert r.status_code == 400
+    r = env.client.post("/api/update-all", headers={"host": "evil.example:8765"})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.1:8765", "localhost", "localhost:54321"])
+def test_local_host_headers_are_accepted(env, host):
+    assert env.client.get("/api/status", headers={"host": host}).status_code == 200
+
+
+def test_cross_origin_post_is_blocked_and_starts_nothing(env):
+    r = env.client.post("/api/playlists", json={"name": "A", "description": "b"},
+                        headers={"origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert r.json() == {"error": "Request blocked: it didn't come from this app's page."}
+    assert env.client.get("/api/job").json() is None
+    assert env.client.post("/api/job/cancel", headers={"origin": "null"}).status_code == 403
+    assert env.client.delete("/api/playlists/PL1", headers={"origin": "http://127.0.0.1:9"}).status_code == 403
+
+
+def test_other_port_on_localhost_origin_is_blocked(env):
+    r = env.client.post("/api/job/cancel", headers={"origin": "http://localhost:9999"})
+    assert r.status_code == 403
+
+
+def test_cross_site_fetch_metadata_is_blocked(env):
+    for site in ("cross-site", "same-site"):
+        r = env.client.post("/api/update-all", headers={"sec-fetch-site": site})
+        assert r.status_code == 403, site
+    assert env.client.post("/api/job/cancel", headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    assert env.client.post("/api/job/cancel", headers={"sec-fetch-site": "none"}).status_code == 200
+
+
+@pytest.mark.parametrize("origin", ["http://127.0.0.1:8765", "http://localhost:8765"])
+def test_same_origin_post_is_allowed(env, origin):
+    r = env.client.post("/api/playlists", json={"name": "A", "description": "b"}, headers={"origin": origin})
+    assert r.status_code == 200
+    assert env.client.get("/api/job").json()["status"] == "review"
+
+
+def test_reads_with_foreign_origin_but_valid_host_still_work(env):
+    r = env.client.get("/api/status", headers={"origin": "https://evil.example",
+                                               "sec-fetch-site": "cross-site"})
+    assert r.status_code == 200
+
+
+def test_update_race_unknown_record_is_404(env, monkeypatch):
+    seed_playlist(env.ytm, env.records, "PL1", "Rock")
+
+    def gone(ids):
+        raise KeyError(ids[0])
+
+    monkeypatch.setattr(env.runner, "start_update", gone)
+    assert env.client.post("/api/playlists/PL1/update").status_code == 404
+    assert env.client.post("/api/update-all").status_code == 404
+
+
+def test_playlist_id_must_fully_match(env):
+    seed_playlist(env.ytm, env.records, "PL1", "Rock")
+    assert env.client.delete("/api/playlists/PL1%0A").status_code == 404
+    assert env.records.get("PL1") is not None
+
+
+def test_forget_blocked_while_a_job_is_running_or_applying(tmp_path):
+    from ytsorter.jobs import Job, Progress
+    env = Env(tmp_path)
+    seed_playlist(env.ytm, env.records, "PL1", "Rock")
+    env.runner._run_in_background = lambda fn: None  # job stays "running"
+    env.client.post("/api/playlists", json={"name": "A", "description": "b"})
+    assert env.client.get("/api/job").json()["status"] == "running"
+    r = env.client.delete("/api/playlists/PL1")
+    assert r.status_code == 409 and r.json()["error"]
+    assert env.records.get("PL1") is not None
+    env.runner._job.status = "applying"
+    assert env.client.delete("/api/playlists/PL1").status_code == 409
+    for status in ("review", "paused", "failed"):
+        env.runner._job.status = status
+        assert env.client.delete("/api/playlists/PL1").status_code == 200, status
+        seed_playlist(env.ytm, env.records, "PL1", "Rock")
+    env.runner.cancel()
+    assert env.client.delete("/api/playlists/PL1").status_code == 200
+
+
+def test_demo_mode_starts_from_a_clean_demo_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("YTSORTER_DEMO", "1")
+    stale = tmp_path / "demo" / "playlists"
+    stale.mkdir(parents=True)
+    (stale / "PLold.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "demo" / "job.json").write_text("{}", encoding="utf-8")
+    real = tmp_path / "playlists"
+    real.mkdir()
+    (real / "PLreal.json").write_text("{}", encoding="utf-8")
+    client = TestClient(build_default_app(), base_url=BASE)
+    assert client.get("/api/playlists").json() == []
+    assert client.get("/api/job").json() is None
+    assert not (stale / "PLold.json").exists()
+    assert (real / "PLreal.json").exists()  # real data is never touched
+
+
+def test_real_mode_never_deletes_anything(monkeypatch, tmp_path):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("YTSORTER_DEMO", raising=False)
+    keep = [tmp_path / "demo" / "playlists" / "PLdemo.json", tmp_path / "playlists" / "PLreal.json"]
+    for path in keep:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    build_default_app()
+    assert all(path.exists() for path in keep)

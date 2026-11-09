@@ -6,6 +6,7 @@ import dataclasses
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import demo_data
 from .claude_cli import ClaudeClassifier
@@ -31,7 +33,7 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATUS_TTL = 10.0  # seconds the Claude CLI check (a subprocess) is reused
-_PLAYLIST_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")  # ids double as filenames: no path tricks
+_PLAYLIST_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # ids double as filenames: no path tricks
 
 
 class ConnectBody(BaseModel):
@@ -86,9 +88,38 @@ def _job_json(job: Job | None) -> dict | None:
     }
 
 
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+_BLOCKED = "Request blocked: it didn't come from this app's page."
+_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _same_origin_ok(request: Request) -> bool:
+    """Writes must come from this app's own page (CSRF); plain clients send neither header."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("origin")
+    if origin is not None:
+        host = request.headers.get("host", "")
+        port = host.rpartition(":")[2] if ":" in host else ""
+        suffix = f":{port}" if port else ""
+        return origin in (f"http://127.0.0.1{suffix}", f"http://localhost{suffix}")
+    return True
+
+
 def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo: bool = False,
                clock: Callable[[], float] = time.monotonic) -> FastAPI:
     app = FastAPI(title="YT Music Sorter", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def _block_cross_origin_writes(request: Request, call_next):
+        if (request.method in _WRITE_METHODS and request.url.path.startswith("/api")
+                and not _same_origin_ok(request)):
+            return _error(403, _BLOCKED)
+        return await call_next(request)
+
+    # Added last = outermost: a DNS-rebinding page (foreign Host header) is refused before anything else.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
     # --- errors: always plain JSON ------------------------------------------------------------
 
@@ -116,7 +147,7 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
 
     def known_playlist(playlist_id: str) -> None:
         """404 unless this is an id of a saved record (validated before it is used anywhere)."""
-        if not _PLAYLIST_ID.match(playlist_id) or records.get(playlist_id) is None:
+        if not _PLAYLIST_ID.fullmatch(playlist_id) or records.get(playlist_id) is None:
             raise StarletteHTTPException(404, "That playlist isn't known to this app.")
 
     # --- status -------------------------------------------------------------------------------
@@ -175,7 +206,10 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
     @app.post("/api/playlists/{playlist_id}/update")
     def update_playlist(playlist_id: str):
         known_playlist(playlist_id)
-        runner.start_update([playlist_id])
+        try:
+            runner.start_update([playlist_id])
+        except KeyError:  # forgotten between the check and the start
+            return _error(404, "That playlist isn't known to this app.")
         return {"started": True}
 
     @app.post("/api/update-all")
@@ -183,12 +217,18 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
         ids = [r.playlist_id for r in records.list()]
         if not ids:
             return _error(400, "You don't have any playlists to update yet.")
-        runner.start_update(ids)
+        try:
+            runner.start_update(ids)
+        except KeyError:
+            return _error(404, "That playlist isn't known to this app.")
         return {"started": True}
 
     @app.delete("/api/playlists/{playlist_id}")
     def forget_playlist(playlist_id: str):
         known_playlist(playlist_id)
+        current = runner.current()
+        if current is not None and current.status in ("running", "applying"):
+            return _error(409, "A job is working right now — wait for it to finish or cancel it first.")
         runner.forget_playlist(playlist_id)
         return {"forgotten": True}
 
@@ -238,6 +278,7 @@ def build_default_app() -> FastAPI:
     demo = os.environ.get("YTSORTER_DEMO") == "1"
     if demo:
         base = data_dir() / "demo"
+        shutil.rmtree(base, ignore_errors=True)  # demo only: records must match the fresh fake library
         records, jobs = RecordStore(base / "playlists"), JobStore(base / "job.json")
         ytm, classifier = FakeYTMusic(list(demo_data.SAMPLE_SONGS)), demo_data.DemoClassifier()
     else:
