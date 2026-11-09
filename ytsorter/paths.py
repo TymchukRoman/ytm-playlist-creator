@@ -8,7 +8,9 @@ from platformdirs import user_data_dir
 def data_dir() -> Path:
     override = os.environ.get("YTSORTER_DATA_DIR")
     path = Path(override) if override else Path(user_data_dir("yt-music-sorter", appauthor=False))
-    path.mkdir(parents=True, exist_ok=True)
+    # Owner-only on POSIX (mode is applied when the folder is created; best effort, Windows
+    # keeps its per-user profile permissions).
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
 
 

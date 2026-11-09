@@ -1,9 +1,13 @@
 """On-disk JSON persistence: atomic helpers and the playlist record store."""
 import json
 import os
+import time
 from pathlib import Path
 
 from .models import PlaylistRecord
+
+REPLACE_TRIES = 5
+REPLACE_WAIT = 0.1  # seconds between tries
 
 
 def write_json_atomic(path: Path, data: dict) -> None:
@@ -11,7 +15,14 @@ def write_json_atomic(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows: a virus scanner / indexer briefly holds the file
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(REPLACE_WAIT)
 
 
 def read_json(path: Path) -> dict | None:

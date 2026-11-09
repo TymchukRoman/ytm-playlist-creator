@@ -4,7 +4,7 @@ Turn your YouTube Music liked songs into playlists, just by describing them.
 
 Type something like *"Anime openings only, no endings or soundtracks"* or *"Songs sung in Ukrainian"*. Claude goes through your liked songs and picks the ones that fit. You get a list with a checkbox next to every song, tick or untick what you like, and only then is the playlist created on your YouTube Music account. Later, one button adds the songs you liked since then.
 
-The app runs on your own computer and opens in your web browser. Nothing is sent anywhere except to YouTube Music (your account) and to Claude (song titles and artists, to decide which songs fit).
+The app runs on your own computer and opens in your web browser. Nothing is sent anywhere except to YouTube Music (your account) and to Claude (each song's title, artists, album and length, to decide which songs fit).
 
 ![The review screen: songs Claude picked, each with a checkbox](docs/images/review-screen.png)
 
@@ -76,7 +76,7 @@ These details let the app act as you on YouTube Music, so treat them like a pass
 3. Press **Create**. A progress bar shows the steps: fetching your liked songs, then asking Claude which songs fit. A big library can take a few minutes.
 4. On the **review screen**, look through the songs.
    - **Included**: songs Claude thinks fit. They start ticked.
-   - **Unsure**: songs Claude could not judge from the title and artist. They start unticked, so tick the ones you want.
+   - **Unsure**: songs Claude could not judge from the title, artists, album and length. They start unticked, so tick the ones you want.
    - **Not included**: songs Claude thinks do not fit. This section starts collapsed. Tick any you want anyway.
 5. Press the button at the bottom (for example **Create playlist with 60 songs**). Only now does anything happen on YouTube Music. If you change your mind, press **Cancel** and nothing is created.
 

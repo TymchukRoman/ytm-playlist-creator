@@ -73,3 +73,69 @@ def test_atomic_write_leaves_no_tmp(tmp_path):
     store.save(make_record())
     assert list(tmp_path.glob("*.tmp")) == []
     assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_data_dir_is_created_owner_only(tmp_path, monkeypatch):
+    import os
+    import stat
+    import pathlib
+
+    target = tmp_path / "fresh" / "data"
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(target))
+    modes = []
+    real_mkdir = pathlib.Path.mkdir
+
+    def spy(self, *args, **kwargs):
+        if self == target:
+            modes.append(kwargs.get("mode", args[0] if args else None))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", spy)
+    paths.data_dir()
+    assert modes and set(modes) == {0o700}
+    if os.name != "nt":
+        assert stat.S_IMODE(target.stat().st_mode) & 0o077 == 0
+
+
+def test_claude_work_dir_is_an_empty_subfolder(tmp_path, monkeypatch):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    assert paths.claude_work_dir() == tmp_path / "claude-work"
+    assert (tmp_path / "claude-work").is_dir()
+
+
+def test_atomic_write_retries_a_briefly_locked_file(tmp_path, monkeypatch):
+    from ytsorter import store as store_mod
+
+    calls = []
+    real_replace = store_mod.os.replace
+
+    def flaky(src, dst):
+        calls.append(dst)
+        if len(calls) < 3:
+            raise PermissionError("sharing violation")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(store_mod.os, "replace", flaky)
+    monkeypatch.setattr(store_mod.time, "sleep", lambda s: None)
+    store_mod.write_json_atomic(tmp_path / "a.json", {"x": 1})
+    assert len(calls) == 3
+    assert json.loads((tmp_path / "a.json").read_text(encoding="utf-8")) == {"x": 1}
+
+
+def test_atomic_write_gives_up_after_a_few_tries(tmp_path, monkeypatch):
+    import pytest
+    from ytsorter import store as store_mod
+
+    calls = []
+
+    def locked(src, dst):
+        calls.append(dst)
+        raise PermissionError("sharing violation")
+
+    sleeps = []
+    monkeypatch.setattr(store_mod.os, "replace", locked)
+    monkeypatch.setattr(store_mod.time, "sleep", sleeps.append)
+    with pytest.raises(PermissionError):
+        store_mod.write_json_atomic(tmp_path / "a.json", {"x": 1})
+    assert len(calls) == 5
+    assert sleeps == [0.1] * 4
