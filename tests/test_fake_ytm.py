@@ -95,3 +95,36 @@ def test_fail_add_at_chunk_is_partial_and_one_shot():
     assert yt.fail_add_at_chunk is None
     yt.add_songs(pid, ids[50:], lambda d, t: None)
     assert yt.added[pid] == ids
+
+
+def test_get_playlist_video_ids_matches_added_and_errors():
+    yt = FakeYTMusic([])
+    pid = yt.create_playlist("n", "d")
+    assert yt.get_playlist_video_ids(pid) == set()
+    yt.add_songs(pid, ["a", "b"], lambda d, t: None)
+    assert yt.get_playlist_video_ids(pid) == {"a", "b"}
+    with pytest.raises(PlaylistMissingError):
+        yt.get_playlist_video_ids("nope")
+    yt.deleted_playlists.add(pid)
+    with pytest.raises(PlaylistMissingError):
+        yt.get_playlist_video_ids(pid)
+    yt.deleted_playlists.clear()
+    yt.expire_auth()
+    with pytest.raises(YouTubeAuthError):
+        yt.get_playlist_video_ids(pid)
+
+
+def test_expire_auth_after_chunk_stops_the_next_chunk():
+    yt = FakeYTMusic([])
+    pid = yt.create_playlist("n", "d")
+    yt.expire_auth_after_chunk = 0
+    progress = []
+    ids = [f"v{i}" for i in range(120)]
+    with pytest.raises(YouTubeAuthError):
+        yt.add_songs(pid, ids, lambda d, t: progress.append((d, t)))
+    assert progress == [(50, 120)]
+    assert yt.added[pid] == ids[:50]
+    assert yt.expire_auth_after_chunk is None
+    yt.connect("headers")
+    yt.add_songs(pid, ids[50:], lambda d, t: None)
+    assert yt.added[pid] == ids

@@ -145,6 +145,18 @@ class YTMusicClient:
             done += len(chunk)
             on_progress(done, total)
 
+    def get_playlist_video_ids(self, playlist_id: str) -> set[str]:
+        """Read-only: the video ids already on a playlist (tracks without a videoId are skipped)."""
+        api = self._client()
+        try:
+            tracks = api.get_playlist(playlist_id, limit=None).get("tracks") or []
+        except Exception as exc:
+            err = _translate(exc)
+            if type(err) is YouTubeError and _NOT_FOUND_RE.search(str(exc)):
+                raise PlaylistMissingError(str(exc)) from exc
+            raise err from exc
+        return {t["videoId"] for t in tracks if t.get("videoId")}
+
     def playlist_exists(self, playlist_id: str) -> bool:
         api = self._client()
         try:

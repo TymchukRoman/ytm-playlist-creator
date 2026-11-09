@@ -393,29 +393,51 @@ class JobRunner:
         source = "claude" if checked == claude_default else "user"
         return SongEntry(s.title, list(s.artists), d.verdict, d.reason, source)
 
+    @staticmethod
+    def _put(record: PlaylistRecord, video_id: str, entry: SongEntry, checked: bool) -> None:
+        """A song is in exactly one of included / excluded."""
+        (record.included if checked else record.excluded)[video_id] = entry
+        (record.excluded if checked else record.included).pop(video_id, None)
+
     def _apply(self, job: Job, t: Target) -> None:
-        """Write the approved songs of `t`, resumably (R7): never a second playlist, never a re-add."""
+        """Write the approved songs of `t`, resumably (R7/R8): never a second playlist, never a re-add."""
         approved = list(t.approved_ids or [])
+        fresh = False
         if t.playlist_id is None and t.created_playlist_id is None:
             with self._lock:
                 job.progress = Progress("create", "Creating playlist on YouTube Music…")
                 self._commit(job)
             new_id = self.ytm.create_playlist(t.name, t.description)
+            fresh = True
+            with self._lock:  # persist the id before anything else, so a resume never creates another
+                t.created_playlist_id = new_id
+                if self._job is job:
+                    self.jobs.save(job)
             now = _now()
-            # Record first, so a retry (or a cancel) still knows this playlist is ours.
+            # Record too, so a retry (or a cancel) still knows this playlist is ours.
             self.records.save(PlaylistRecord(new_id, t.name, t.description, now, now))
             with self._lock:
-                t.created_playlist_id = new_id
                 self._commit(job)
         pid = t.playlist_id or t.created_playlist_id
         record = self.records.get(pid)
+        if record is None and t.playlist_id is None:  # crashed between saving the job and the record
+            now = _now()
+            record = PlaylistRecord(pid, t.name, t.description, now, now)
+            self.records.save(record)
         if record is None:
             raise LookupError(f"“{t.name}” is no longer in your list of playlists, so nothing was added.")
+        try:
+            # R8: songs already on the playlist (hand-added, or a chunk whose save was lost) count as added.
+            on_playlist = set() if fresh else self.ytm.get_playlist_video_ids(pid)
+        except PlaylistMissingError as exc:
+            raise _PlaylistGone(t) from exc
         by_id = {s.video_id: s for s in t.songs}
-        already = set(t.added_ids) | set(record.included)
+        already = set(t.added_ids) | set(record.included) | on_playlist
         remaining = [v for v in approved if v not in already]
         total, base = len(approved), len(approved) - len(remaining)
         with self._lock:
+            recorded = set(t.added_ids)
+            t.added_ids.extend(v for v in approved if v in already and v not in recorded)
             job.progress = Progress("add", f"Adding songs… {base} of {total}", base, total)
             self._commit(job)
         sent = 0
@@ -424,7 +446,7 @@ class JobRunner:
             nonlocal sent
             newly, sent = remaining[sent:done], done
             for v in newly:  # these are on YouTube now: record them even if the job was cancelled
-                record.included[v] = self._entry(t, by_id[v], True)
+                self._put(record, v, self._entry(t, by_id[v], True), True)
             self.records.save(record)
             with self._lock:
                 if self._job is not job:
@@ -441,7 +463,7 @@ class JobRunner:
         chosen = set(approved)
         for s in t.songs:
             checked = s.video_id in chosen
-            (record.included if checked else record.excluded)[s.video_id] = self._entry(t, s, checked)
+            self._put(record, s.video_id, self._entry(t, s, checked), checked)
         record.updated_at = _now()
         self.records.save(record)
         with self._lock:

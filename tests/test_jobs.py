@@ -304,9 +304,9 @@ def test_skip_not_allowed_on_create(stores):
 def test_update_missing_playlist_fails_clearly(stores):
     records, _ = stores
     fake = FakeYTMusic(songs("a", "b"))
-    records.save(PlaylistRecord("PLgone", "Rock", "rock", "2026-01-01T00:00:00+00:00",
-                                "2026-01-01T00:00:00+00:00"))
-    fake.deleted_playlists = {"PLgone"}
+    seed_playlist(fake, records, "PLgone", "Rock", included=["a"])
+    assert fake.playlist_exists("PLgone")
+    fake.deleted_playlists = {"PLgone"}  # the user deleted it on YouTube Music
     clf = RecordingClassifier()
     runner = make_runner(stores, fake, clf)
     runner.start_update(["PLgone"])
@@ -314,8 +314,8 @@ def test_update_missing_playlist_fails_clearly(stores):
     assert job.status == "failed"
     assert job.error == "The playlist “Rock” no longer exists on YouTube Music."
     assert job.missing_playlist_id == "PLgone"
-    assert fake.created == {}
-    assert fake.added == {}
+    assert list(fake.created) == ["PLgone"]  # not recreated
+    assert fake.added == {"PLgone": ["a"]}
     assert clf.sent == []
 
     runner.forget_playlist("PLgone")
@@ -592,3 +592,114 @@ def test_default_runs_in_background_thread(stores):
         time.sleep(0.01)
     assert runner.current().status == "done"
     assert list(fake.added.values()) == [["v1"]]
+
+
+# --- Fix round 1: songs already on the playlist (R8), crash windows, record invariants ---------
+
+def test_update_song_already_on_playlist_is_not_re_added(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "c", "d"))
+    seed_playlist(fake, records, "PL1", "Rock", included=["a"])
+    fake.added["PL1"].append("c")  # the user hand-added liked song c on YouTube Music
+    runner = make_runner(stores, fake, RecordingClassifier({"c": "include", "d": "include"}))
+    runner.start_update(["PL1"])
+    runner.approve(["c", "d"])
+    job = runner.current()
+    assert job.status == "done", job.error
+    assert fake.added["PL1"] == ["a", "c", "d"]
+    rec = records.get("PL1")
+    assert set(rec.included) == {"a", "c", "d"}
+    assert rec.included["c"].source == "claude"
+
+
+def test_resume_after_lost_chunk_save_adds_no_duplicates(stores):
+    records, _ = stores
+    all_songs = make_songs(150)
+    ids = [s.video_id for s in all_songs]
+    fake = FakeYTMusic(all_songs)
+    runner = make_runner(stores, fake, RecordingClassifier({v: "include" for v in ids}))
+    runner.start_create("Rock", "rock")
+    fake.fail_add_at_chunk = 1
+    runner.approve(ids)
+    assert runner.current().status == "failed"
+    pid = next(iter(fake.created))
+    # Simulated crash: YouTube accepted chunk 1, but neither the job nor the record saw it.
+    fake.added[pid].extend(ids[50:100])
+    assert runner.current().targets[0].added_ids == ids[:50]
+
+    runner2 = make_runner(stores, fake, RecordingClassifier())
+    runner2.resume()
+    assert runner2.current().status == "done", runner2.current().error
+    assert len(fake.created) == 1
+    assert sorted(fake.added[pid]) == sorted(ids)
+    assert set(records.get(pid).included) == set(ids)
+
+
+def test_created_playlist_id_saved_before_record(stores, tmp_path):
+    _, jobs = stores
+
+    class FlakyRecords(RecordStore):
+        fail_once = True
+
+        def save(self, record):
+            if self.fail_once:
+                self.fail_once = False
+                raise OSError("disk hiccup")
+            super().save(record)
+
+    records = FlakyRecords(tmp_path / "playlists")
+    fake = FakeYTMusic(songs("a"))
+    runner = JobRunner(records, jobs, fake, RecordingClassifier({"a": "include"}), run_in_background=sync)
+    runner.start_create("Rock", "rock")
+    runner.approve(["a"])
+    job = runner.current()
+    assert job.status == "failed"
+    pid = next(iter(fake.created))
+    assert jobs.load().targets[0].created_playlist_id == pid
+
+    runner2 = JobRunner(records, jobs, fake, RecordingClassifier(), run_in_background=sync)
+    runner2.resume()
+    assert runner2.current().status == "done", runner2.current().error
+    assert list(fake.created) == [pid]
+    assert fake.added == {pid: ["a"]}
+    assert set(records.get(pid).included) == {"a"}
+
+
+def test_song_never_in_both_included_and_excluded(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "c", "d"))
+    seed_playlist(fake, records, "PL1", "Rock", included=["a"])
+    runner = make_runner(stores, fake, RecordingClassifier({"c": "include"}))
+    runner.start_update(["PL1"])
+    # The record changes while the review is open (e.g. another run): c excluded, d included.
+    rec = records.get("PL1")
+    rec.excluded["c"] = SongEntry("Title c", ["A"], "exclude", "earlier", "user")
+    rec.included["d"] = SongEntry("Title d", ["A"], "include", "earlier", "claude")
+    records.save(rec)
+    runner.approve(["c"])
+    rec = records.get("PL1")
+    assert not set(rec.included) & set(rec.excluded)
+    assert "c" in rec.included and "d" in rec.excluded
+
+
+def test_youtube_auth_expires_mid_add_pauses_and_resumes(stores):
+    records, _ = stores
+    all_songs = make_songs(120)
+    ids = [s.video_id for s in all_songs]
+    fake = FakeYTMusic(all_songs)
+    runner = make_runner(stores, fake, RecordingClassifier({v: "include" for v in ids}))
+    runner.start_create("Rock", "rock")
+    fake.expire_auth_after_chunk = 0
+    runner.approve(ids)
+    job = runner.current()
+    assert (job.status, job.error) == ("paused", YT_AUTH_MSG)
+    pid = next(iter(fake.created))
+    assert fake.added[pid] == ids[:50]
+
+    fake.connect("headers")
+    runner.resume()
+    assert runner.current().status == "done", runner.current().error
+    assert len(fake.created) == 1
+    assert sorted(fake.added[pid]) == sorted(ids)
+    assert len(fake.added[pid]) == 120
+    assert set(records.get(pid).included) == set(ids)

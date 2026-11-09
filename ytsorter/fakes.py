@@ -49,6 +49,7 @@ class FakeYTMusic:
         self.deleted_playlists: set[str] = set()
         self.fail_next_add = 0
         self.fail_add_at_chunk: int | None = None  # 0-based chunk index that fails; one-shot
+        self.expire_auth_after_chunk: int | None = None  # sign-in expires after this chunk; one-shot
         self._connected = connected
         self._expired = False
         self._counter = 0
@@ -94,6 +95,7 @@ class FakeYTMusic:
         done = 0
         for index, start in enumerate(range(0, total, CHUNK_SIZE)):
             chunk = video_ids[start:start + CHUNK_SIZE]
+            self._check_auth()  # like the real API: every chunk is its own request
             if self.fail_add_at_chunk == index:
                 self.fail_add_at_chunk = None
                 raise YouTubeError("Couldn't add songs (fake, mid-job)")
@@ -103,6 +105,15 @@ class FakeYTMusic:
             self.added.setdefault(playlist_id, []).extend(chunk)
             done += len(chunk)
             on_progress(done, total)
+            if self.expire_auth_after_chunk == index:
+                self.expire_auth_after_chunk = None
+                self.expire_auth()
+
+    def get_playlist_video_ids(self, playlist_id: str) -> set[str]:
+        self._check_auth()
+        if not self.playlist_exists(playlist_id):
+            raise PlaylistMissingError(f"Playlist {playlist_id} not found (fake)")
+        return set(self.added.get(playlist_id, []))
 
     def playlist_exists(self, playlist_id: str) -> bool:
         self._check_auth()

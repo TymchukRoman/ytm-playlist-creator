@@ -17,8 +17,10 @@ from ytsorter.ytm import (
 class FakeApi:
     """Stands in for ytmusicapi.YTMusic; records every call."""
 
-    def __init__(self, tracks=None, raises: Exception | None = None, add_result=None):
+    def __init__(self, tracks=None, raises: Exception | None = None, add_result=None, playlist_tracks=None):
         self.tracks = tracks or []
+        self.playlist_tracks = playlist_tracks or []
+        self.playlist_limits = []
         self.raises = raises
         self.add_result = add_result if add_result is not None else {"status": "STATUS_SUCCEEDED"}
         self.liked_limits = []
@@ -46,7 +48,8 @@ class FakeApi:
 
     def get_playlist(self, playlistId, limit=100, **kw):
         self._maybe_raise()
-        return {"id": playlistId, "tracks": []}
+        self.playlist_limits.append(limit)
+        return {"id": playlistId, "tracks": self.playlist_tracks}
 
 
 def make_client(tmp_path: Path, api: FakeApi, connected: bool = True) -> YTMusicClient:
@@ -251,6 +254,31 @@ def test_playlist_exists_other_errors_propagate(tmp_path):
         make_client(tmp_path, FakeApi(raises=Exception("boom"))).playlist_exists("PL1")
     with pytest.raises(YouTubeAuthError):
         make_client(tmp_path, FakeApi(raises=Exception("HTTP 403"))).playlist_exists("PL1")
+
+
+def test_get_playlist_video_ids_reads_all_and_skips_missing_ids(tmp_path):
+    api = FakeApi(playlist_tracks=[{"videoId": "a"}, {"videoId": None}, {"title": "gone"}, {"videoId": "b"},
+                                   {"videoId": "a"}])
+    assert make_client(tmp_path, api).get_playlist_video_ids("PL1") == {"a", "b"}
+    assert api.playlist_limits == [None]
+
+
+def test_get_playlist_video_ids_not_found_is_playlist_missing(tmp_path):
+    api = FakeApi(raises=Exception("Server returned HTTP 404: Not Found.\nPlaylist does not exist"))
+    with pytest.raises(PlaylistMissingError):
+        make_client(tmp_path, api).get_playlist_video_ids("PL1")
+
+
+def test_get_playlist_video_ids_other_errors_translate(tmp_path):
+    with pytest.raises(YouTubeAuthError):
+        make_client(tmp_path, FakeApi(raises=Exception("HTTP 401"))).get_playlist_video_ids("PL1")
+    with pytest.raises(YouTubeError) as info:
+        make_client(tmp_path, FakeApi(raises=Exception("boom"))).get_playlist_video_ids("PL1")
+    assert type(info.value) is YouTubeError
+    with pytest.raises(YouTubeAuthError):
+        offline = tmp_path / "offline"
+        offline.mkdir()
+        make_client(offline, FakeApi(), connected=False).get_playlist_video_ids("PL1")
 
 
 def test_client_has_no_remove_methods():
