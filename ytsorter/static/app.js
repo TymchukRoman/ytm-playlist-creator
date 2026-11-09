@@ -28,6 +28,7 @@ const state = {
 
 let pollTimer = null;
 let review = null; // {key, data, selected:Set, built:{exclude:bool}}
+const approvedCounts = new Map(); // "jobId:playlist name" -> songs ticked when approved
 
 // --- small helpers --------------------------------------------------------------------------
 
@@ -271,9 +272,9 @@ function renderMain() {
     update.type = "button";
     update.setAttribute("aria-label", `Update “${p.name}”`);
     update.addEventListener("click", () => act(update, "playlists-error", async () => {
-      missing.delete(p.playlist_id); // if it is still gone, the job reports it again
-      saveMissing(missing);
       await api(`/api/playlists/${encodeURIComponent(p.playlist_id)}/update`, { method: "POST" });
+      missing.delete(p.playlist_id); // started: if it is still gone, the job reports it again
+      saveMissing(missing);
       await poll();
     }));
     actions.append(update);
@@ -363,6 +364,7 @@ function buildReview(data, key) {
   fillSection("include");
   fillSection("unsure");
   showMessage("review-error", "");
+  $("btn-approve").disabled = false; // updateApprove sets it for this review
 }
 
 function renderReview() {
@@ -387,7 +389,7 @@ function updateApprove() {
   const create = state.job.kind === "create";
   const btn = $("btn-approve");
   btn.textContent = create ? `Create playlist with ${plural(n, "song", "songs")}` : `Add ${plural(n, "song", "songs")}`;
-  if (create) btn.disabled = n === 0;
+  btn.disabled = create && n === 0;
   $("review-zero-hint").hidden = create || n > 0;
 }
 
@@ -437,17 +439,25 @@ function renderStopped() {
 function renderDone() {
   const j = state.job;
   const nothingDone = Boolean(j.notice) && j.progress.message === j.notice; // stopped before any review
-  const approved = j.targets.filter((t) => t.approved).map((t) => `“${t.name}”`);
+  const approved = j.targets.filter((t) => t.approved);
+  const names = (list) => list.map((t) => `“${t.name}”`).join(", ");
   let title, message;
   if (nothingDone) {
     title = "Nothing to add";
     message = j.notice || j.progress.message;
   } else if (j.kind === "create") {
     title = "Your playlist is ready";
-    message = `${approved[0] || "Your playlist"} is now on YouTube Music. It's private, so only you can see it.`;
+    message = `${approved.length ? names(approved) : "Your playlist"} is now on YouTube Music. It's private, so only you can see it.`;
   } else {
+    // How many songs were ticked is only known in this tab (null after a reload: say "Updated").
+    const count = (t) => approvedCounts.get(`${j.id}:${t.name}`) ?? null;
+    const added = approved.filter((t) => count(t) !== 0);
+    const none = approved.filter((t) => count(t) === 0);
     title = "All done";
-    message = approved.length ? `Updated ${approved.join(", ")} on YouTube Music.` : "No playlists were changed.";
+    const parts = [];
+    if (added.length) parts.push(`Updated ${names(added)} on YouTube Music.`);
+    if (none.length) parts.push(`Nothing added to ${names(none)}.`);
+    message = parts.join(" ") || "No playlists were changed.";
   }
   $("done-title").textContent = title;
   $("done-message").textContent = message;
@@ -518,7 +528,12 @@ function wire() {
     await poll();
   }));
 
-  $("btn-progress-cancel").addEventListener("click", (e) => act(e.currentTarget, "progress-error", cancelJob));
+  $("btn-progress-cancel").addEventListener("click", (e) => {
+    // Classifying can simply stop; while songs are being written, make sure it is meant.
+    if (state.job && state.job.status === "applying"
+        && !window.confirm("Stop adding songs? Songs already added stay on the playlist.")) return;
+    act(e.currentTarget, "progress-error", cancelJob);
+  });
 
   const reviewView = $("view-review");
   reviewView.addEventListener("change", onReviewChange);
@@ -528,13 +543,20 @@ function wire() {
   });
   $("btn-approve").addEventListener("click", (e) => act(e.currentTarget, "review-error", async () => {
     await api("/api/job/approve", { method: "POST", body: { video_ids: [...review.selected] } });
+    approvedCounts.set(`${state.job.id}:${review.data.target_name}`, review.selected.size);
     await poll();
   }));
   $("btn-skip").addEventListener("click", (e) => act(e.currentTarget, "review-error", async () => {
     await api("/api/job/skip", { method: "POST" });
     await poll();
   }));
-  $("btn-review-cancel").addEventListener("click", (e) => act(e.currentTarget, "review-error", cancelJob));
+  $("btn-review-cancel").addEventListener("click", (e) => {
+    const earlier = state.job && state.job.targets.some((t) => t.approved); // Update all, a later playlist
+    if (!window.confirm(earlier
+      ? "Discard this review and the playlists not reviewed yet? Songs already added to earlier playlists stay."
+      : "Discard this review? Nothing has been added to YouTube Music yet.")) return;
+    act(e.currentTarget, "review-error", cancelJob);
+  });
 
   $("btn-reconnect").addEventListener("click", () => {
     showMessage("stopped-ok", "");
