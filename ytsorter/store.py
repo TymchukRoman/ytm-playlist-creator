@@ -51,3 +51,23 @@ class RecordStore:
     def delete(self, playlist_id: str) -> None:
         """Remove only the local record file; never touches YouTube Music."""
         self._path(playlist_id).unlink(missing_ok=True)
+
+
+class JobStore:
+    """The single in-progress job, saved as one JSON file so it survives restarts."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def load(self):
+        """Return the saved `jobs.Job`, or None."""
+        from .jobs import Job  # local import: jobs.py imports this module
+
+        data = read_json(self.path)
+        return Job.from_dict(data) if data is not None else None
+
+    def save(self, job) -> None:
+        write_json_atomic(self.path, job.to_dict())
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
