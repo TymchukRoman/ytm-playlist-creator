@@ -68,3 +68,30 @@ def test_disconnect_and_no_remove_methods():
     yt.disconnect()
     assert not yt.is_connected()
     assert not any(n.startswith(("remove", "delete", "unlike", "rate")) for n in dir(FakeYTMusic))
+
+
+def test_duplicate_in_chunk_fails_and_adds_nothing_from_that_chunk():
+    yt = FakeYTMusic([])
+    pid = yt.create_playlist("n", "d")
+    yt.add_songs(pid, ["a", "b"], lambda d, t: None)
+    progress = []
+    ids = [f"v{i}" for i in range(50)] + ["x", "b", "y"]  # second chunk contains existing b
+    with pytest.raises(YouTubeError):
+        yt.add_songs(pid, ids, lambda d, t: progress.append((d, t)))
+    assert progress == [(50, 53)]
+    assert yt.added[pid] == ["a", "b"] + [f"v{i}" for i in range(50)]
+
+
+def test_fail_add_at_chunk_is_partial_and_one_shot():
+    yt = FakeYTMusic([])
+    pid = yt.create_playlist("n", "d")
+    yt.fail_add_at_chunk = 1
+    progress = []
+    ids = [f"v{i}" for i in range(120)]
+    with pytest.raises(YouTubeError):
+        yt.add_songs(pid, ids, lambda d, t: progress.append((d, t)))
+    assert progress == [(50, 120)]
+    assert yt.added[pid] == ids[:50]
+    assert yt.fail_add_at_chunk is None
+    yt.add_songs(pid, ids[50:], lambda d, t: None)
+    assert yt.added[pid] == ids

@@ -48,6 +48,7 @@ class FakeYTMusic:
         self.added: dict[str, list[str]] = {}
         self.deleted_playlists: set[str] = set()
         self.fail_next_add = 0
+        self.fail_add_at_chunk: int | None = None  # 0-based chunk index that fails; one-shot
         self._connected = connected
         self._expired = False
         self._counter = 0
@@ -91,8 +92,14 @@ class FakeYTMusic:
             raise YouTubeError("Couldn't add songs (fake)")
         total = len(video_ids)
         done = 0
-        for start in range(0, total, CHUNK_SIZE):
+        for index, start in enumerate(range(0, total, CHUNK_SIZE)):
             chunk = video_ids[start:start + CHUNK_SIZE]
+            if self.fail_add_at_chunk == index:
+                self.fail_add_at_chunk = None
+                raise YouTubeError("Couldn't add songs (fake, mid-job)")
+            existing = set(self.added.get(playlist_id, []))
+            if any(vid in existing for vid in chunk):  # the real client sends duplicates=False
+                raise YouTubeError("Some songs are already in the playlist (fake)")
             self.added.setdefault(playlist_id, []).extend(chunk)
             done += len(chunk)
             on_progress(done, total)

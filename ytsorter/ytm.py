@@ -4,6 +4,7 @@ Safety rule: this wrapper can only create playlists and add songs. It has no way
 remove songs, unlike, rate, or delete playlists. `disconnect` only deletes the local
 sign-in file.
 """
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -50,16 +51,32 @@ class YTMusicClient:
         return self.auth_file.exists()
 
     def connect(self, headers_raw: str) -> None:
-        self._api = None
+        """Verify new credentials in a temp file; only replace the saved sign-in on success."""
+        tmp = self.auth_file.with_name(self.auth_file.name + ".new")
         try:
-            ytmusicapi.setup(filepath=str(self.auth_file), headers_raw=headers_raw)
-            self._factory(str(self.auth_file)).get_liked_songs(limit=1)
+            content = ytmusicapi.setup(headers_raw=headers_raw)
+            self._write_private(tmp, content)
+            self._factory(str(tmp)).get_liked_songs(limit=1)
+            os.replace(tmp, self.auth_file)
         except Exception as exc:
-            self.auth_file.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
             raise YouTubeAuthError(
                 "Those sign-in details didn't work. Copy the request headers again from your "
                 "browser while signed in to music.youtube.com."
             ) from exc
+        self._api = None  # rebuilt from the new credentials on next use
+
+    @staticmethod
+    def _write_private(path: Path, content: str) -> None:
+        """Write owner-only (the file holds session cookies)."""
+        path.unlink(missing_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # best effort; the per-user AppData folder is already private on Windows
 
     def disconnect(self) -> None:
         self._api = None

@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -93,6 +95,24 @@ def test_add_songs_chunks_of_50_and_reports_progress(tmp_path):
     assert progress == [(50, 120), (100, 120), (120, 120)]
 
 
+def test_add_songs_auth_expires_mid_job(tmp_path):
+    api = FakeApi()
+    real_add = api.add_playlist_items
+
+    def flaky(playlistId, videoIds=None, source_playlist=None, duplicates=False):
+        if len(api.add_calls) == 1:
+            raise Exception("Server returned HTTP 401: Unauthorized")
+        return real_add(playlistId, videoIds, duplicates=duplicates)
+
+    api.add_playlist_items = flaky
+    progress = []
+    with pytest.raises(YouTubeAuthError):
+        make_client(tmp_path, api).add_songs(
+            "PL1", [f"v{i}" for i in range(120)], lambda d, t: progress.append((d, t)))
+    assert progress == [(50, 120)]
+    assert len(api.add_calls) == 1
+
+
 def test_add_songs_failed_status_raises(tmp_path):
     api = FakeApi(add_result={"error": {"message": "duplicate"}})
     with pytest.raises(YouTubeError):
@@ -130,48 +150,84 @@ def test_not_connected_raises_auth_error(tmp_path):
         client.get_liked_songs()
 
 
-def test_connect_ok_writes_via_setup_and_verifies(tmp_path, monkeypatch):
+def patch_setup(monkeypatch, content="NEWCREDS", raises: Exception | None = None):
     calls = []
-    auth = tmp_path / "auth.json"
 
     def fake_setup(filepath=None, headers_raw=None):
         calls.append((filepath, headers_raw))
-        Path(filepath).write_text("{}", encoding="utf-8")
-        return "{}"
+        if raises:
+            raise raises
+        return content
 
     monkeypatch.setattr(ytm.ytmusicapi, "setup", fake_setup)
-    api = FakeApi()
-    client = YTMusicClient(auth, factory=lambda path: api)
-    client.connect("raw headers")
-    assert calls == [(str(auth), "raw headers")]
-    assert api.liked_limits == [1]
-    assert client.is_connected()
+    return calls
 
 
-def test_connect_bad_headers_removes_file(tmp_path, monkeypatch):
+def test_connect_ok_verifies_then_saves(tmp_path, monkeypatch):
+    calls = patch_setup(monkeypatch, content="NEWCREDS Привет")
     auth = tmp_path / "auth.json"
+    seen = []
+    api = FakeApi()
 
-    def fake_setup(filepath=None, headers_raw=None):
-        Path(filepath).write_text("{}", encoding="utf-8")
-        return "{}"
+    def factory(path):
+        seen.append((path, Path(path).read_text(encoding="utf-8")))
+        return api
 
-    monkeypatch.setattr(ytm.ytmusicapi, "setup", fake_setup)
+    client = YTMusicClient(auth, factory=factory)
+    client.connect("raw headers")
+    assert calls == [(None, "raw headers")]  # setup never writes the file itself
+    assert api.liked_limits == [1]
+    assert seen[0][0] != str(auth) and seen[0][1].startswith("NEWCREDS")  # verified from a temp file
+    assert auth.read_text(encoding="utf-8") == "NEWCREDS Привет"
+    assert client.is_connected()
+    assert [p.name for p in tmp_path.iterdir()] == ["auth.json"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_connect_writes_owner_only_file(tmp_path, monkeypatch):
+    patch_setup(monkeypatch)
+    auth = tmp_path / "auth.json"
+    YTMusicClient(auth, factory=lambda path: FakeApi()).connect("h")
+    assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+
+
+def test_connect_bad_headers_leaves_no_file(tmp_path, monkeypatch):
+    patch_setup(monkeypatch)
+    auth = tmp_path / "auth.json"
     client = YTMusicClient(auth, factory=lambda path: FakeApi(raises=Exception("HTTP 401")))
     with pytest.raises(YouTubeAuthError, match="didn't work"):
         client.connect("junk")
-    assert not auth.exists()
+    assert list(tmp_path.iterdir()) == []
     assert not client.is_connected()
 
 
-def test_connect_setup_rejecting_headers_is_auth_error(tmp_path, monkeypatch):
-    def fake_setup(filepath=None, headers_raw=None):
-        raise Exception("Cookie missing")
+def test_connect_bad_headers_keeps_existing_good_signin(tmp_path, monkeypatch):
+    patch_setup(monkeypatch, content="BADCREDS")
+    auth = tmp_path / "auth.json"
+    auth.write_text("OLDCREDS", encoding="utf-8")
+    old_api = FakeApi()
 
-    monkeypatch.setattr(ytm.ytmusicapi, "setup", fake_setup)
+    def factory(path):
+        if Path(path).read_text(encoding="utf-8") == "BADCREDS":
+            return FakeApi(raises=Exception("HTTP 401"))
+        return old_api
+
+    client = YTMusicClient(auth, factory=factory)
+    client.get_liked_songs()  # caches the old API object
+    with pytest.raises(YouTubeAuthError):
+        client.connect("junk")
+    assert auth.read_text(encoding="utf-8") == "OLDCREDS"
+    assert client.is_connected()
+    assert [p.name for p in tmp_path.iterdir()] == ["auth.json"]
+    assert client._client() is old_api
+
+
+def test_connect_setup_rejecting_headers_is_auth_error(tmp_path, monkeypatch):
+    patch_setup(monkeypatch, raises=Exception("Cookie missing"))
     client = YTMusicClient(tmp_path / "auth.json", factory=lambda path: FakeApi())
     with pytest.raises(YouTubeAuthError):
         client.connect("junk")
-    assert not (tmp_path / "auth.json").exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_disconnect_deletes_auth_file(tmp_path):
