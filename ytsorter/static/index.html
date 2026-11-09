@@ -3,9 +3,245 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>YT Music Sorter</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='2' width='14' height='2.4' rx='1.2' fill='%235b4be0'/%3E%3Crect x='1' y='6.8' width='10' height='2.4' rx='1.2' fill='%2300a3a1'/%3E%3Crect x='1' y='11.6' width='6' height='2.4' rx='1.2' fill='%23f0a43a'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <p>YT Music Sorter — UI coming</p>
+  <header class="app-head">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-name">YT Music Sorter</span>
+    </div>
+  </header>
+
+  <div id="offline" class="banner banner-bad" role="alert" hidden>
+    Can't reach the app. Make sure its window is still open, then reload this page.
+  </div>
+  <div id="demo-banner" class="banner" hidden>
+    Demo mode: sample songs and a pretend Claude. Nothing is sent to YouTube Music or Claude.
+  </div>
+
+  <main id="app">
+    <!-- Loading -->
+    <section id="view-loading" class="view">
+      <p class="lead">Loading…</p>
+    </section>
+
+    <!-- Setup -->
+    <section id="view-setup" class="view" hidden>
+      <h1 tabindex="-1">Let's get you set up</h1>
+      <p class="lead" id="setup-lead">This app needs two things before it can make playlists for you.</p>
+
+      <ul class="checklist">
+        <li class="check" id="check-claude">
+          <div class="check-head">
+            <span class="mark" aria-hidden="true"></span>
+            <h2>Claude</h2>
+            <span class="check-state"></span>
+          </div>
+          <div class="check-body">
+            <p class="check-message" id="claude-message"></p>
+            <ol class="steps">
+              <li>Install Claude Code from the
+                <a href="https://docs.claude.com/en/docs/claude-code/setup" target="_blank" rel="noopener">official install page</a>.</li>
+              <li>Open a terminal. On Windows, press Start, type <strong>Terminal</strong> and open it.
+                On a Mac, open <strong>Terminal</strong> from Applications, then Utilities.</li>
+              <li>Type <code>claude</code>, press Enter, and follow the steps to log in. You can close the terminal afterwards.</li>
+              <li>Come back here and press <strong>Check again</strong>.</li>
+            </ol>
+            <button type="button" class="btn btn-secondary" id="btn-check-again">Check again</button>
+          </div>
+        </li>
+
+        <li class="check" id="check-youtube">
+          <div class="check-head">
+            <span class="mark" aria-hidden="true"></span>
+            <h2 id="youtube-heading">YouTube Music</h2>
+            <span class="check-state"></span>
+          </div>
+          <div class="check-body">
+            <p>Connect your YouTube Music account by copying a few details from your web browser.
+              It takes about two minutes. Pick the browser you use:</p>
+
+            <div class="tabs" role="tablist" aria-label="Your browser">
+              <button type="button" role="tab" id="tab-chrome" aria-controls="guide-chrome" aria-selected="true">Chrome or Edge</button>
+              <button type="button" role="tab" id="tab-firefox" aria-controls="guide-firefox" aria-selected="false" tabindex="-1">Firefox</button>
+            </div>
+
+            <div role="tabpanel" id="guide-chrome" aria-labelledby="tab-chrome" class="guide">
+              <ol class="steps">
+                <li data-slot="chrome-1">Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
+                  in Chrome or Edge and make sure you are signed in.</li>
+                <li data-slot="chrome-2">Press <kbd>F12</kbd> to open the developer tools.
+                  On a Mac, press <kbd>Cmd</kbd>+<kbd>Option</kbd>+<kbd>I</kbd>.</li>
+                <li data-slot="chrome-3">Click the <strong>Network</strong> tab at the top of the developer tools.</li>
+                <li data-slot="chrome-4">Type <code>browse</code> into the filter box.
+                  If the list stays empty, click <strong>Home</strong> or <strong>Library</strong> on the YouTube Music page.</li>
+                <li data-slot="chrome-5">Right-click the first request in the list, then choose
+                  <strong>Copy</strong> and then <strong>Copy request headers</strong>.</li>
+                <li data-slot="chrome-6">Paste them into the box below (<kbd>Ctrl</kbd>+<kbd>V</kbd>,
+                  or <kbd>Cmd</kbd>+<kbd>V</kbd> on a Mac) and press <strong>Connect</strong>.</li>
+              </ol>
+            </div>
+
+            <div role="tabpanel" id="guide-firefox" aria-labelledby="tab-firefox" class="guide" hidden>
+              <ol class="steps">
+                <li data-slot="firefox-1">Open <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a>
+                  in Firefox and make sure you are signed in.</li>
+                <li data-slot="firefox-2">Press <kbd>F12</kbd> to open the developer tools.
+                  On a Mac, press <kbd>Cmd</kbd>+<kbd>Option</kbd>+<kbd>I</kbd>.</li>
+                <li data-slot="firefox-3">Click the <strong>Network</strong> tab at the top of the developer tools.</li>
+                <li data-slot="firefox-4">Type <code>browse</code> into the <strong>Filter URLs</strong> box.
+                  If the list stays empty, click <strong>Home</strong> or <strong>Library</strong> on the YouTube Music page.</li>
+                <li data-slot="firefox-5">Click the first request in the list. On the right, find <strong>Request Headers</strong>
+                  and switch on the <strong>Raw</strong> toggle next to it.</li>
+                <li data-slot="firefox-6">Select all of the text under Request Headers, copy it, paste it into the box below
+                  and press <strong>Connect</strong>.</li>
+              </ol>
+            </div>
+
+            <form id="connect-form" class="connect" novalidate>
+              <label for="headers">Paste the request headers here</label>
+              <textarea id="headers" rows="7" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+              <p class="note">These details let this app act as you on YouTube Music. They stay on this computer only.</p>
+              <p class="error" id="connect-error" role="alert" hidden></p>
+              <button type="submit" class="btn btn-primary" id="btn-connect">Connect</button>
+            </form>
+          </div>
+        </li>
+      </ul>
+
+      <div class="row-actions" id="setup-back" hidden>
+        <button type="button" class="btn btn-secondary" id="btn-setup-back">Back</button>
+      </div>
+    </section>
+
+    <!-- Main -->
+    <section id="view-main" class="view" hidden>
+      <form id="create-form" class="panel create" novalidate>
+        <h1 tabindex="-1">Make a playlist from your liked songs</h1>
+        <p class="lead">Describe what belongs in it. Claude goes through your liked songs and picks the ones that fit.
+          You see the list and choose before anything is created.</p>
+        <label for="desc">Which songs should be in it?</label>
+        <textarea id="desc" rows="3" placeholder="e.g. Anime openings only — no endings or soundtracks"></textarea>
+        <label for="name">Playlist name</label>
+        <input id="name" type="text" maxlength="150" autocomplete="off">
+        <p class="error" id="create-error" role="alert" hidden></p>
+        <button type="submit" class="btn btn-primary btn-big" id="btn-create">Create</button>
+      </form>
+
+      <section class="playlists" aria-labelledby="playlists-heading">
+        <div class="list-head">
+          <h2 id="playlists-heading">Your playlists</h2>
+          <button type="button" class="btn btn-secondary" id="btn-update-all" hidden>Update all</button>
+        </div>
+        <p class="hint" id="playlists-hint" hidden>Update looks for songs you liked since last time. Nothing is ever removed.</p>
+        <p class="error" id="playlists-error" role="alert" hidden></p>
+        <ul class="playlist-list" id="playlist-list"></ul>
+        <p class="empty" id="playlists-empty" hidden>No playlists yet. Describe your first one above and press Create.</p>
+      </section>
+    </section>
+
+    <!-- Progress -->
+    <section id="view-progress" class="view" hidden>
+      <div class="panel">
+        <h1 tabindex="-1" id="progress-title">Working…</h1>
+        <p class="progress-message" id="progress-message" aria-live="polite"></p>
+        <div class="bar" id="progress-bar" role="progressbar" aria-labelledby="progress-message">
+          <div class="bar-fill"></div>
+        </div>
+        <p class="hint">A big library can take a few minutes. Keep this page open, or close it and come back later.</p>
+        <p class="error" id="progress-error" role="alert" hidden></p>
+        <button type="button" class="btn btn-secondary" id="btn-progress-cancel">Cancel</button>
+      </div>
+    </section>
+
+    <!-- Review -->
+    <section id="view-review" class="view" hidden>
+      <p class="step" id="review-step" hidden></p>
+      <h1 tabindex="-1" id="review-title">Review</h1>
+      <p class="lead">Tick the songs you want. Nothing changes on YouTube Music until you press the button at the bottom.</p>
+      <p class="notice" id="review-notice" hidden></p>
+
+      <section class="group" id="group-include" aria-labelledby="h-include">
+        <div class="group-head">
+          <h2 id="h-include">Included <span class="count"></span></h2>
+          <div class="group-tools">
+            <button type="button" class="link-btn" data-select="all">Select all</button>
+            <button type="button" class="link-btn" data-select="none">Select none</button>
+          </div>
+        </div>
+        <p class="group-hint">Claude thinks these fit.</p>
+        <p class="empty empty-include">Claude didn't find songs that clearly fit. Look through the other sections below.</p>
+        <ul class="songs"></ul>
+      </section>
+
+      <section class="group group-unsure" id="group-unsure" aria-labelledby="h-unsure">
+        <div class="group-head">
+          <h2 id="h-unsure">Unsure <span class="count"></span></h2>
+          <div class="group-tools">
+            <button type="button" class="link-btn" data-select="all">Select all</button>
+            <button type="button" class="link-btn" data-select="none">Select none</button>
+          </div>
+        </div>
+        <p class="group-hint">Claude couldn't tell from the title and artist. Tick the ones you want.</p>
+        <ul class="songs"></ul>
+      </section>
+
+      <details class="group group-exclude" id="group-exclude">
+        <summary><h2>Not included <span class="count"></span></h2></summary>
+        <div class="group-head">
+          <p class="group-hint">Claude thinks these don't fit. Tick any you want anyway.</p>
+          <div class="group-tools">
+            <button type="button" class="link-btn" data-select="all">Select all</button>
+            <button type="button" class="link-btn" data-select="none">Select none</button>
+          </div>
+        </div>
+        <ul class="songs"></ul>
+      </details>
+
+      <div class="actionbar">
+        <p class="error" id="review-error" role="alert" hidden></p>
+        <p class="hint" id="review-zero-hint" hidden>No songs will be added. These songs won't be suggested again for this playlist.</p>
+        <div class="actionbar-buttons">
+          <button type="button" class="btn btn-primary btn-big" id="btn-approve">Create playlist</button>
+          <button type="button" class="btn btn-secondary" id="btn-skip" hidden>Skip this playlist</button>
+          <button type="button" class="btn btn-quiet" id="btn-review-cancel">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Paused / Failed -->
+    <section id="view-stopped" class="view" hidden>
+      <div class="panel">
+        <h1 tabindex="-1" id="stopped-title">Paused</h1>
+        <p class="callout" id="stopped-error"></p>
+        <p class="hint" id="stopped-hint">The work done so far is saved.</p>
+        <p class="ok-msg" id="stopped-ok" role="status" hidden></p>
+        <p class="error" id="stopped-action-error" role="alert" hidden></p>
+        <div class="row-actions">
+          <button type="button" class="btn btn-primary" id="btn-reconnect" hidden>Reconnect YouTube Music</button>
+          <button type="button" class="btn btn-primary" id="btn-forget-missing" hidden>Forget this playlist</button>
+          <button type="button" class="btn btn-secondary" id="btn-resume">Resume</button>
+          <button type="button" class="btn btn-quiet" id="btn-stopped-cancel">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Done -->
+    <section id="view-done" class="view" hidden>
+      <div class="panel panel-done">
+        <h1 tabindex="-1" id="done-title">All done</h1>
+        <p class="lead" id="done-message"></p>
+        <p class="notice" id="done-notice" hidden></p>
+        <p class="error" id="done-error" role="alert" hidden></p>
+        <button type="button" class="btn btn-primary btn-big" id="btn-done">Back to your playlists</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
 </body>
 </html>
