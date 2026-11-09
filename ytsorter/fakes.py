@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from .claude_cli import ClaudeStatus, ClaudeUsageLimitError
 from .models import Decision, Song, Verdict
+from .ytm import CHUNK_SIZE, PlaylistMissingError, YouTubeAuthError, YouTubeError
 
 Rules = Callable[[str, Song], tuple[Verdict, str]]
 
@@ -36,3 +37,66 @@ class FakeClassifier:
             verdict, reason = self.rules(description, song)
             decisions.append(Decision(song.video_id, verdict, reason))
         return decisions
+
+
+class FakeYTMusic:
+    """Stands in for YTMusicClient. Records writes; has no remove/unlike methods."""
+
+    def __init__(self, liked: list[Song], connected: bool = True):
+        self.liked = list(liked)
+        self.created: dict[str, dict] = {}
+        self.added: dict[str, list[str]] = {}
+        self.deleted_playlists: set[str] = set()
+        self.fail_next_add = 0
+        self._connected = connected
+        self._expired = False
+        self._counter = 0
+
+    def expire_auth(self) -> None:
+        """Every method (except is_connected/disconnect) raises YouTubeAuthError until connect()."""
+        self._expired = True
+
+    def _check_auth(self) -> None:
+        if self._expired or not self._connected:
+            raise YouTubeAuthError("YouTube Music sign-in expired (fake)")
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def connect(self, headers_raw: str) -> None:
+        self._connected = True
+        self._expired = False
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def get_liked_songs(self) -> list[Song]:
+        self._check_auth()
+        return list(self.liked)
+
+    def create_playlist(self, name: str, description: str) -> str:
+        self._check_auth()
+        self._counter += 1
+        pid = f"PLfake{self._counter}"
+        self.created[pid] = {"name": name, "description": description, "privacy_status": "PRIVATE"}
+        return pid
+
+    def add_songs(self, playlist_id: str, video_ids: list[str],
+                  on_progress: Callable[[int, int], None]) -> None:
+        self._check_auth()
+        if not self.playlist_exists(playlist_id):
+            raise PlaylistMissingError(f"Playlist {playlist_id} not found (fake)")
+        if self.fail_next_add > 0:
+            self.fail_next_add -= 1
+            raise YouTubeError("Couldn't add songs (fake)")
+        total = len(video_ids)
+        done = 0
+        for start in range(0, total, CHUNK_SIZE):
+            chunk = video_ids[start:start + CHUNK_SIZE]
+            self.added.setdefault(playlist_id, []).extend(chunk)
+            done += len(chunk)
+            on_progress(done, total)
+
+    def playlist_exists(self, playlist_id: str) -> bool:
+        self._check_auth()
+        return playlist_id in self.created and playlist_id not in self.deleted_playlists
