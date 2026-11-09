@@ -30,8 +30,11 @@ class FakeRunner:
         self.responses = list(responses)
         self.calls: list[tuple[list[str], str]] = []
 
-    def __call__(self, args, stdin_text):
+        self.timeouts: list = []
+
+    def __call__(self, args, stdin_text, timeout=None):
         self.calls.append((args, stdin_text))
+        self.timeouts.append(timeout)
         return self.responses.pop(0)
 
 
@@ -122,11 +125,57 @@ def test_unparseable_first_response_retries_whole_batch():
     assert [s["n"] for s in prompt_songs(runner.calls[1][1])] == [1, 2]
 
 
-def test_everything_unparseable_twice_gives_all_unsure():
+UNREADABLE_MSG = "Claude's answer couldn't be read. Your progress is saved — press Resume to try again."
+
+
+def test_everything_unparseable_twice_raises_instead_of_all_unsure():
     runner = FakeRunner(proc("garbage"), proc("more garbage"))
-    result = classifier(runner).classify_batch("d", songs2())
-    assert result == [Decision(s.video_id, "unsure", "Claude didn't answer for this song") for s in songs2()]
+    with pytest.raises(ClaudeError) as exc:
+        classifier(runner).classify_batch("d", songs2())
+    assert str(exc.value) == UNREADABLE_MSG
+    assert not isinstance(exc.value, (ClaudeAuthError, ClaudeUsageLimitError))
     assert len(runner.calls) == 2
+
+
+def test_no_valid_decision_in_either_reply_raises():
+    runner = FakeRunner(proc(envelope([{"n": 9, "verdict": "include", "reason": "x"}])), proc(envelope([])))
+    with pytest.raises(ClaudeError, match="couldn't be read"):
+        classifier(runner).classify_batch("d", songs2())
+
+
+def test_prompt_describes_the_json_shape_for_the_text_fallback():
+    runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a"}, {"n": 2, "verdict": "exclude", "reason": "b"}])))
+    classifier(runner).classify_batch("d", songs2())
+    stdin = runner.calls[0][1]
+    assert '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"..."}]}' in stdin
+
+
+@pytest.mark.parametrize("structured", ["not an object", {"other": 1}, {"decisions": "nope"}, None])
+def test_invalid_structured_output_falls_back_to_result_text(structured):
+    text = '{"decisions": [{"n": 1, "verdict": "include", "reason": "a"}, {"n": 2, "verdict": "exclude", "reason": "b"}]}'
+    runner = FakeRunner(proc(json.dumps({"is_error": False, "structured_output": structured, "result": text})))
+    result = classifier(runner).classify_batch("d", songs2())
+    assert result == [Decision("vid1", "include", "a"), Decision("vid2", "exclude", "b")]
+    assert len(runner.calls) == 1
+
+
+def test_nonzero_exit_with_valid_success_envelope_is_parsed():
+    runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a"}, {"n": 2, "verdict": "unsure", "reason": "b"}]),
+                             returncode=1, stderr="some warning"))
+    result = classifier(runner).classify_batch("d", songs2())
+    assert result == [Decision("vid1", "include", "a"), Decision("vid2", "unsure", "b")]
+    assert len(runner.calls) == 1
+
+
+TOO_OLD_MSG = "Your Claude Code is too old for this app. Run `claude update`, then try again."
+
+
+@pytest.mark.parametrize("out", [proc("", returncode=1, stderr="error: unknown option '--json-schema'"),
+                                 proc(json.dumps({"is_error": True, "result": "Error: Unknown option: --tools"}))])
+def test_old_claude_code_unknown_option_says_update(out):
+    with pytest.raises(ClaudeError) as exc:
+        classifier(FakeRunner(out)).classify_batch("d", songs2())
+    assert str(exc.value) == TOO_OLD_MSG
 
 
 def test_out_of_range_duplicate_and_invalid_decisions_are_ignored():
@@ -230,7 +279,23 @@ def test_status_logged_out():
     runner = FakeRunner(proc(json.dumps({"loggedIn": False, "authMethod": "none"})))
     status = classifier(runner).status()
     assert status.installed is True and status.logged_in is False
-    assert "log" in status.message.lower()
+    assert "Open a terminal, run `claude`, and log in" in status.message
+
+
+def test_status_check_uses_a_short_timeout():
+    runner = FakeRunner(proc(json.dumps({"loggedIn": True})))
+    classifier(runner).status()
+    assert runner.timeouts == [claude_cli.STATUS_TIMEOUT]
+    assert 10 <= claude_cli.STATUS_TIMEOUT <= 30
+
+
+def test_status_timeout_is_not_logged_in_with_plain_message():
+    def runner(args, stdin_text, timeout=None):
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    status = classifier(runner).status()
+    assert status.installed is True and status.logged_in is False
+    assert "too long" in status.message and "Open a terminal, run `claude`, and log in" in status.message
 
 
 def test_status_uses_which_when_no_executable(monkeypatch):
@@ -251,7 +316,7 @@ def test_classify_without_executable_raises(monkeypatch):
         ClaudeClassifier(runner=FakeRunner()).classify_batch("d", songs2())
 
 
-def test_default_runner_runs_in_data_dir(tmp_path, monkeypatch):
+def test_default_runner_runs_in_an_empty_work_folder(tmp_path, monkeypatch):
     monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
     seen = {}
 
@@ -266,7 +331,10 @@ def test_default_runner_runs_in_data_dir(tmp_path, monkeypatch):
     assert seen["kwargs"]["encoding"] == "utf-8"
     assert seen["kwargs"]["timeout"] == 300
     assert seen["kwargs"]["capture_output"] is True
-    assert seen["kwargs"]["cwd"] == tmp_path
+    assert seen["kwargs"]["cwd"] == tmp_path / "claude-work"  # not next to youtube_auth.json
+    assert (tmp_path / "claude-work").is_dir()
+    claude_cli.default_runner(["x"], "", timeout=20)
+    assert seen["kwargs"]["timeout"] == 20
 
 
 class TestFakeClassifier:

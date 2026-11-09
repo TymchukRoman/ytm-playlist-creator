@@ -132,7 +132,7 @@ The details you pasted do not last forever (they also stop working after you sig
 Your Claude subscription has a limit on how much you can use in a period. The run pauses and **keeps the finished work**. Come back later and press **Resume**. It continues where it stopped, even after closing the app.
 
 **"Claude isn't logged in" or "Claude CLI not found".**
-Follow the Claude steps in [First-time setup](#1-claude): install Claude Code, run `claude` in a terminal once and log in, then press **Check again** (or **Resume**).
+Follow the Claude steps in [First-time setup](#1-claude): install Claude Code, then open a terminal, run `claude`, and log in. Then press **Check again** (or **Resume**).
 
 **The app does not open in my browser.**
 Look at the window the start script opened. It prints a line like `YT Music Sorter is running at http://127.0.0.1:8765/`. Copy that address into your browser.

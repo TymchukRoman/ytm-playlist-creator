@@ -7,7 +7,7 @@ from ytsorter.models import PlaylistRecord, Song, SongEntry
 from ytsorter.store import JobStore, RecordStore
 
 USAGE_MSG = "Claude usage limit reached. Your progress is saved — press Resume later."
-CLAUDE_AUTH_MSG = "Claude isn't logged in. Run `claude` once to sign in, then press Resume."
+CLAUDE_AUTH_MSG = "Claude isn't logged in. Open a terminal, run `claude`, and log in, then press Resume."
 YT_AUTH_MSG = "YouTube Music sign-in expired — reconnect, then press Resume."
 CLOSED_MSG = "The app was closed during this step — press Resume."
 NO_NEW = "No new liked songs since last update"
@@ -745,3 +745,30 @@ def test_forget_refused_for_a_playlist_the_current_job_uses(stores):
     runner._job.status = "done"
     runner.forget_playlist("PL1")
     assert records.get("PL1") is None
+
+
+# --- Songs Claude never answered --------------------------------------------------------------
+
+def test_unanswered_songs_left_unticked_are_checked_again_next_update(stores):
+    from ytsorter.claude_cli import UNANSWERED_REASON
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b", "c", "d"))
+
+    def rules(_d, s):
+        if s.video_id in ("b", "c"):
+            return "unsure", UNANSWERED_REASON
+        return ("include", "fits") if s.video_id == "a" else ("unsure", "can't tell")
+
+    runner = make_runner(stores, fake, FakeClassifier(rules=rules))
+    runner.start_create("Rock", "rock")
+    runner.approve(["a", "c"])  # c ticked by the user, b left unticked
+    pid = next(iter(fake.created))
+    rec = records.get(pid)
+    assert set(rec.included) == {"a", "c"}
+    assert set(rec.excluded) == {"d"}  # a real "unsure" left unticked is remembered; b is not
+    assert fake.added == {pid: ["a", "c"]}
+
+    clf = RecordingClassifier()
+    runner2 = make_runner(stores, fake, clf)
+    runner2.start_update([pid])
+    assert clf.sent == ["b"]

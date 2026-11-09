@@ -9,9 +9,19 @@ from dataclasses import dataclass
 from . import paths
 from .models import Decision, Song
 
-Runner = Callable[[list[str], str], subprocess.CompletedProcess]
+# runner(args, stdin_text) for a classify call; runner(args, stdin_text, timeout=...) for the status check.
+Runner = Callable[..., subprocess.CompletedProcess]
 
 UNANSWERED_REASON = "Claude didn't answer for this song"
+UNREADABLE_MSG = "Claude's answer couldn't be read. Your progress is saved — press Resume to try again."
+TOO_OLD_MSG = "Your Claude Code is too old for this app. Run `claude update`, then try again."
+LOGIN_STEPS = "Open a terminal, run `claude`, and log in"
+NOT_LOGGED_IN_MSG = f"Claude isn't logged in. {LOGIN_STEPS}, then press Check again."
+STATUS_SLOW_MSG = (f"Checking whether Claude is logged in took too long. {LOGIN_STEPS} if you haven't yet, "
+                   "then press Check again.")
+CLASSIFY_TIMEOUT = 300  # seconds for one batch
+STATUS_TIMEOUT = 20  # seconds for `claude auth status`
+_JSON_SHAPE = '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"..."}]}'
 _VERDICTS = ("include", "exclude", "unsure")
 
 SYSTEM_PROMPT = (
@@ -48,15 +58,16 @@ class ClaudeStatus:
     message: str
 
 
-def default_runner(args: list[str], stdin_text: str) -> subprocess.CompletedProcess:
-    # cwd is the app-data folder so no project CLAUDE.md / settings of the caller's directory apply.
+def default_runner(args: list[str], stdin_text: str, timeout: float = CLASSIFY_TIMEOUT) -> subprocess.CompletedProcess:
+    # cwd is an empty folder of our own: no project CLAUDE.md / settings apply, and the
+    # folder holding the YouTube sign-in file is never Claude's working directory.
     return subprocess.run(
         args,
         input=stdin_text,
         capture_output=True,
         encoding="utf-8",
-        timeout=300,
-        cwd=paths.data_dir(),
+        timeout=timeout,
+        cwd=paths.claude_work_dir(),
     )
 
 
@@ -69,6 +80,7 @@ def _build_prompt(description: str, songs: list[Song]) -> str:
         f"Playlist description: {description}\n\n"
         "For each numbered song below, decide whether it belongs in that playlist "
         "(include, exclude or unsure) and give a short reason. "
+        f"Answer with only a JSON object of this exact shape: {_JSON_SHAPE}\n"
         "Songs as a JSON array:\n"
         f"{json.dumps(items, ensure_ascii=False)}"
     )
@@ -92,8 +104,15 @@ def _parse_json_text(text: str) -> object | None:
     return None
 
 
+def _raise_if_too_old(text: str) -> None:
+    """An older Claude Code doesn't know one of the options this app passes."""
+    if "unknown option" in text.lower():
+        raise ClaudeError(TOO_OLD_MSG)
+
+
 def _raise_for_error_envelope(envelope: dict) -> None:
     text = str(envelope.get("result") or "").strip()
+    _raise_if_too_old(text)
     lowered = text.lower()
     if "limit" in lowered:
         raise ClaudeUsageLimitError(text)
@@ -111,6 +130,7 @@ def _extract_decisions(proc: subprocess.CompletedProcess) -> list | None:
     envelope = _parse_json_text(proc.stdout or "")
     if not isinstance(envelope, dict):
         if proc.returncode != 0:
+            _raise_if_too_old(f"{proc.stderr or ''} {proc.stdout or ''}")
             tail = (proc.stderr or proc.stdout or "").strip()[-500:]
             raise ClaudeError(f"Claude CLI exited with code {proc.returncode}: {tail}")
         return None
@@ -118,7 +138,7 @@ def _extract_decisions(proc: subprocess.CompletedProcess) -> list | None:
         _raise_for_error_envelope(envelope)
 
     payload = envelope.get("structured_output")
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
         result = envelope.get("result")
         payload = _parse_json_text(result) if isinstance(result, str) else None
     if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
@@ -163,13 +183,15 @@ class ClaudeClassifier:
         if not exe:
             return ClaudeStatus(False, False, "Claude CLI not found. Install Claude Code and make sure `claude` is on your PATH.")
         try:
-            proc = self._run([exe, "auth", "status", "--json"], "")
-        except ClaudeError as e:
-            return ClaudeStatus(True, False, f"Could not check Claude sign-in: {e}")
+            proc = self._runner([exe, "auth", "status", "--json"], "", timeout=STATUS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return ClaudeStatus(True, False, STATUS_SLOW_MSG)
+        except OSError as e:
+            return ClaudeStatus(True, False, f"Could not check whether Claude is logged in: {e}")
         info = _parse_json_text(proc.stdout or "")
         if isinstance(info, dict) and info.get("loggedIn") is True:
-            return ClaudeStatus(True, True, "Claude CLI is signed in.")
-        return ClaudeStatus(True, False, "Claude CLI is not logged in. Run `claude auth login` in a terminal.")
+            return ClaudeStatus(True, True, "Claude is logged in.")
+        return ClaudeStatus(True, False, NOT_LOGGED_IN_MSG)
 
     def _ask(self, exe: str, description: str, songs: list[Song]) -> dict[int, tuple[str, str]]:
         """One CLI call for `songs`; returns decisions keyed by 1-based position (possibly empty)."""
@@ -186,7 +208,10 @@ class ClaudeClassifier:
         """Exactly one Decision per song, in input order.
 
         Songs Claude skipped (or a wholly unusable reply) are retried once; any still
-        missing become `unsure`. CLI error envelopes (usage limit, auth) raise immediately.
+        missing become `unsure` (UNANSWERED_REASON). If not one song got a real answer,
+        ClaudeError(UNREADABLE_MSG) is raised instead, so the job stops for a Resume rather
+        than filling the review with guesses. CLI error envelopes (usage limit, auth) raise
+        immediately.
         """
         if not songs:
             return []
@@ -203,6 +228,8 @@ class ClaudeClassifier:
             pending = [i for i in pending if i not in decided]
             if not pending:
                 break
+        if not decided:
+            raise ClaudeError(UNREADABLE_MSG)
 
         return [
             Decision(song.video_id, *decided[i]) if i in decided else Decision(song.video_id, "unsure", UNANSWERED_REASON)

@@ -22,3 +22,10 @@ def playlists_dir() -> Path:
 
 def job_file() -> Path:
     return data_dir() / "job.json"
+
+
+def claude_work_dir() -> Path:
+    """An empty folder used as the Claude CLI's working directory (created on demand)."""
+    path = data_dir() / "claude-work"
+    path.mkdir(exist_ok=True)
+    return path

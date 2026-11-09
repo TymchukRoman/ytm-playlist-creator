@@ -25,7 +25,7 @@ from .ytm import PlaylistMissingError, YouTubeAuthError
 JobStatus = Literal["running", "review", "applying", "paused", "failed", "done"]
 
 USAGE_LIMIT_MSG = "Claude usage limit reached. Your progress is saved — press Resume later."
-CLAUDE_AUTH_MSG = "Claude isn't logged in. Run `claude` once to sign in, then press Resume."
+CLAUDE_AUTH_MSG = "Claude isn't logged in. Open a terminal, run `claude`, and log in, then press Resume."
 YOUTUBE_AUTH_MSG = "YouTube Music sign-in expired — reconnect, then press Resume."
 APP_CLOSED_MSG = "The app was closed during this step — press Resume."
 NO_NEW_SONGS = "No new liked songs since last update"
@@ -416,6 +416,11 @@ class JobRunner:
         return SongEntry(s.title, list(s.artists), d.verdict, d.reason, source)
 
     @staticmethod
+    def _unanswered(t: Target, s: Song) -> bool:
+        d = t.decisions.get(s.video_id)
+        return d is None or d.reason == UNANSWERED_REASON
+
+    @staticmethod
     def _put(record: PlaylistRecord, video_id: str, entry: SongEntry, checked: bool) -> None:
         """A song is in exactly one of included / excluded."""
         (record.included if checked else record.excluded)[video_id] = entry
@@ -485,6 +490,8 @@ class JobRunner:
         chosen = set(approved)
         for s in t.songs:
             checked = s.video_id in chosen
+            if not checked and self._unanswered(t, s):
+                continue  # Claude never judged it: leave it unrecorded so the next Update asks again
             self._put(record, s.video_id, self._entry(t, s, checked), checked)
         record.updated_at = _now()
         self.records.save(record)
