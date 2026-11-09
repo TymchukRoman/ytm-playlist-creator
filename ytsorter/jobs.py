@@ -32,6 +32,16 @@ NO_NEW_SONGS = "No new liked songs since last update"
 NO_LIKED_SONGS = "You don't have any liked songs yet."
 FETCH_MSG = "Fetching your liked songs…"
 CLASSIFY_MSG = "Asking Claude which songs fit…"
+NAME_MAX = 150  # YouTube Music's limit for a playlist title
+BAD_NAME_MSG = "Playlist names can't contain < or > and must be 150 characters or fewer."
+JOB_WORKING_MSG = "A job is working right now — wait for it to finish or cancel it first."
+IN_JOB_MSG = "This playlist is part of the current job — finish or cancel that first."
+
+
+def check_playlist_name(name: str) -> None:
+    """Raise ValueError for a name YouTube Music would refuse (only at approve time, otherwise)."""
+    if "<" in name or ">" in name or len(name) > NAME_MAX:
+        raise ValueError(BAD_NAME_MSG)
 
 
 def missing_playlist_message(name: str) -> str:
@@ -197,6 +207,7 @@ class JobRunner:
             return copy.deepcopy(self._job)
 
     def start_create(self, name: str, description: str) -> Job:
+        check_playlist_name(name)
         return self._start("create", [Target(None, name, description)])
 
     def start_update(self, playlist_ids: list[str]) -> Job:
@@ -247,8 +258,19 @@ class JobRunner:
         self._run_in_background(lambda: self._work(job))
 
     def forget_playlist(self, playlist_id: str) -> None:
-        """Remove the local record only (the playlist was deleted on YouTube Music)."""
-        self.records.delete(playlist_id)
+        """Remove the local record only (the playlist was deleted on YouTube Music).
+
+        Refused (JobBusyError) while a job is working, or while an unfinished job still needs
+        this playlist, except when it is the one the job found missing (the Forget offer).
+        """
+        with self._lock:
+            job = self._job
+            if job is not None and job.status in ("running", "applying"):
+                raise JobBusyError(JOB_WORKING_MSG)
+            if (job is not None and job.status != "done" and playlist_id != job.missing_playlist_id
+                    and any(t.playlist_id == playlist_id for t in job.targets)):
+                raise JobBusyError(IN_JOB_MSG)
+            self.records.delete(playlist_id)
 
     # --- helpers (callers of _commit/_advance hold the lock) ------------------------------
 

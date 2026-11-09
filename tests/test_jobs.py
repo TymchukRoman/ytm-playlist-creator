@@ -703,3 +703,45 @@ def test_youtube_auth_expires_mid_add_pauses_and_resumes(stores):
     assert sorted(fake.added[pid]) == sorted(ids)
     assert len(fake.added[pid]) == 120
     assert set(records.get(pid).included) == set(ids)
+
+
+# --- Names YouTube Music refuses / forgetting a playlist the job uses ------------------------
+
+NAME_MSG = "Playlist names can't contain < or > and must be 150 characters or fewer."
+
+
+@pytest.mark.parametrize("name", ["Rock <3", "a>b", "x" * 151])
+def test_start_create_rejects_names_youtube_music_refuses(stores, name):
+    clf = RecordingClassifier()
+    runner = make_runner(stores, FakeYTMusic(songs("a")), clf)
+    with pytest.raises(ValueError) as exc:
+        runner.start_create(name, "rock")
+    assert str(exc.value) == NAME_MSG
+    assert runner.current() is None and clf.sent == []
+
+
+def test_start_create_accepts_a_150_character_name(stores):
+    runner = make_runner(stores, FakeYTMusic(songs("a")), RecordingClassifier())
+    runner.start_create("x" * 150, "rock")
+    assert runner.current().status == "review"
+
+
+def test_forget_refused_for_a_playlist_the_current_job_uses(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b"))
+    seed_playlist(fake, records, "PL1", "Rock")
+    seed_playlist(fake, records, "PL2", "Jazz")
+    seed_playlist(fake, records, "PL3", "Pop")
+    runner = make_runner(stores, fake, RecordingClassifier())
+    runner.start_update(["PL1", "PL2"])
+    for status in ("review", "paused", "failed"):
+        runner._job.status = status
+        for pid in ("PL1", "PL2"):
+            with pytest.raises(JobBusyError):
+                runner.forget_playlist(pid)
+    assert records.get("PL1") is not None and records.get("PL2") is not None
+    runner.forget_playlist("PL3")  # not part of the job
+    assert records.get("PL3") is None
+    runner._job.status = "done"
+    runner.forget_playlist("PL1")
+    assert records.get("PL1") is None

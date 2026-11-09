@@ -603,3 +603,31 @@ def test_real_mode_never_deletes_anything(monkeypatch, tmp_path):
         path.write_text("{}", encoding="utf-8")
     build_default_app()
     assert all(path.exists() for path in keep)
+
+
+# --- names YouTube Music refuses / forgetting a playlist the job uses -------------------------
+
+NAME_MSG = "Playlist names can't contain < or > and must be 150 characters or fewer."
+
+
+@pytest.mark.parametrize("name", ["Rock <3", "a>b", "x" * 151])
+def test_create_with_a_name_youtube_music_refuses_is_400(env, name):
+    r = create_playlist(env, name=name)
+    assert r.status_code == 400
+    assert r.json() == {"error": NAME_MSG}
+    assert env.client.get("/api/job").json() is None
+
+
+def test_forget_blocked_for_a_target_of_the_current_job(env):
+    seed_playlist(env.ytm, env.records, "PL1", "Rock")
+    seed_playlist(env.ytm, env.records, "PL2", "Jazz")
+    assert env.client.post("/api/update-all").status_code == 200
+    assert env.client.get("/api/job").json()["status"] == "review"
+    for status in ("review", "paused", "failed"):
+        env.runner._job.status = status
+        for pid in ("PL1", "PL2"):
+            r = env.client.delete(f"/api/playlists/{pid}")
+            assert r.status_code == 409 and r.json()["error"], (status, pid)
+    assert env.records.get("PL1") is not None and env.records.get("PL2") is not None
+    env.runner._job.status = "done"
+    assert env.client.delete("/api/playlists/PL1").status_code == 200

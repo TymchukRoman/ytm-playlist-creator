@@ -200,7 +200,10 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
             return _error(400, "Give the playlist a name.")
         if not description:
             return _error(400, "Describe which songs belong in the playlist.")
-        runner.start_create(name, description)
+        try:
+            runner.start_create(name, description)
+        except ValueError as exc:  # a name YouTube Music would refuse
+            return _error(400, str(exc))
         return {"started": True}
 
     @app.post("/api/playlists/{playlist_id}/update")
@@ -226,10 +229,7 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
     @app.delete("/api/playlists/{playlist_id}")
     def forget_playlist(playlist_id: str):
         known_playlist(playlist_id)
-        current = runner.current()
-        if current is not None and current.status in ("running", "applying"):
-            return _error(409, "A job is working right now — wait for it to finish or cancel it first.")
-        runner.forget_playlist(playlist_id)
+        runner.forget_playlist(playlist_id)  # JobBusyError (409) while a job works on / needs it
         return {"forgotten": True}
 
     # --- the job ------------------------------------------------------------------------------
