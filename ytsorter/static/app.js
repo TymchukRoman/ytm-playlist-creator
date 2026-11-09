@@ -367,6 +367,23 @@ function buildReview(data, key) {
   $("btn-approve").disabled = false; // updateApprove sets it for this review
 }
 
+/** Update all skipped a playlist deleted on YouTube Music: its id, or null. */
+function skippedMissing(j) {
+  const id = j.missing_playlist_id;
+  return id && j.targets.some((t) => t.skipped && t.playlist_id === id) ? id : null;
+}
+
+/** Offer "Forget" for a playlist Update all skipped because it was deleted (the job goes on). */
+function renderMissingOffer(prefix) {
+  const j = state.job;
+  const id = skippedMissing(j);
+  $(`${prefix}-missing`).hidden = !id;
+  if (!id) return;
+  const target = j.targets.find((t) => t.playlist_id === id);
+  const btn = $(`btn-${prefix}-forget`);
+  btn.textContent = target ? `Forget “${target.name}”` : "Forget this playlist";
+}
+
 function renderReview() {
   const j = state.job;
   const data = j.review;
@@ -378,6 +395,7 @@ function renderReview() {
   $("review-step").hidden = !multi;
   $("review-step").textContent = `Playlist ${data.index} of ${data.count}`;
   showMessage("review-notice", j.notice);
+  renderMissingOffer("review");
   $("btn-skip").hidden = !multi;
   updateApprove();
   return fresh;
@@ -428,10 +446,13 @@ function renderStopped() {
   $("stopped-error").textContent = j.error || "Something went wrong.";
   const reconnect = isSignInError(j.error) && state.reconnectedJob !== j.id;
   $("btn-reconnect").hidden = !reconnect;
-  $("btn-forget-missing").hidden = !j.missing_playlist_id;
+  // Only when the deleted playlist is what stopped the job (a playlist Update all skipped is
+  // offered on the review / done screens instead).
+  const gone = Boolean(j.missing_playlist_id) && !skippedMissing(j);
+  $("btn-forget-missing").hidden = !gone;
   // Resume is the main action unless something has to be fixed first.
-  $("btn-resume").className = `btn ${reconnect || j.missing_playlist_id ? "btn-secondary" : "btn-primary"}`;
-  $("stopped-hint").textContent = j.missing_playlist_id
+  $("btn-resume").className = `btn ${reconnect || gone ? "btn-secondary" : "btn-primary"}`;
+  $("stopped-hint").textContent = gone
     ? "Forget it to remove it from your list here. Nothing on YouTube Music changes."
     : "The work done so far is saved.";
 }
@@ -462,6 +483,7 @@ function renderDone() {
   $("done-title").textContent = title;
   $("done-message").textContent = message;
   showMessage("done-notice", nothingDone ? "" : j.notice);
+  renderMissingOffer("done");
 }
 
 /** Discard the current job (or a finished one) and go back. */
@@ -551,10 +573,17 @@ function wire() {
     await poll();
   }));
   $("btn-review-cancel").addEventListener("click", (e) => {
-    const earlier = state.job && state.job.targets.some((t) => t.approved); // Update all, a later playlist
-    if (!window.confirm(earlier
-      ? "Discard this review and the playlists not reviewed yet? Songs already added to earlier playlists stay."
-      : "Discard this review? Nothing has been added to YouTube Music yet.")) return;
+    const targets = state.job ? state.job.targets : [];
+    const earlier = targets.some((t) => t.approved); // Update all, a later playlist
+    const others = targets.filter((t) => !t.approved && !t.skipped).length > 1; // Update all, more to review
+    let question = "Discard this review? Nothing has been added to YouTube Music yet.";
+    if (earlier) {
+      question = "Discard this review and the playlists not reviewed yet? Songs already added to earlier playlists stay.";
+    } else if (others) {
+      question = "Discard this review? Claude's finished checks for the other playlists are dropped too, "
+        + "so they are checked again next time. Nothing has been added to YouTube Music yet.";
+    }
+    if (!window.confirm(question)) return;
     act(e.currentTarget, "review-error", cancelJob);
   });
 
@@ -564,9 +593,15 @@ function wire() {
     render();
   });
   $("btn-forget-missing").addEventListener("click", (e) => act(e.currentTarget, "stopped-action-error", async () => {
-    await forgetPlaylist(state.job.missing_playlist_id);
+    await forgetPlaylist(state.job.missing_playlist_id); // the job can't go on without it
     await cancelJob();
   }));
+  for (const prefix of ["review", "done"]) {
+    $(`btn-${prefix}-forget`).addEventListener("click", (e) => act(e.currentTarget, `${prefix}-error`, async () => {
+      await forgetPlaylist(state.job.missing_playlist_id); // only the record: the job goes on
+      await poll();
+    }));
+  }
   $("btn-resume").addEventListener("click", (e) => act(e.currentTarget, "stopped-action-error", async () => {
     showMessage("stopped-ok", "");
     await api("/api/job/resume", { method: "POST" });

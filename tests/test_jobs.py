@@ -772,3 +772,106 @@ def test_unanswered_songs_left_unticked_are_checked_again_next_update(stores):
     runner2 = make_runner(stores, fake, clf)
     runner2.start_update([pid])
     assert clf.sent == ["b"]
+
+
+# --- Update all with a playlist deleted on YouTube Music -------------------------------------
+
+GONE_JAZZ = "The playlist “Jazz” no longer exists on YouTube Music, so it was skipped."
+
+
+def three_playlists(fake, records):
+    for pid, name in (("PL1", "Rock"), ("PL2", "Jazz"), ("PL3", "Pop")):
+        seed_playlist(fake, records, pid, name, included=["a"])
+
+
+def test_update_all_skips_a_deleted_playlist_and_keeps_going(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b", "c"))
+    three_playlists(fake, records)
+    jazz = records.get("PL2")
+    fake.deleted_playlists = {"PL2"}
+    clf = RecordingClassifier({"b": "include"})
+    runner = make_runner(stores, fake, clf)
+
+    runner.start_update(["PL1", "PL2", "PL3"])
+    job = runner.current()
+    assert job.status == "review" and job.review_index == 0
+    assert job.targets[1].skipped is True
+    assert job.missing_playlist_id == "PL2"
+    assert job.notice == GONE_JAZZ
+    assert clf.sent == ["b", "c", "b", "c"]  # Jazz is never classified
+
+    runner.approve(["b"])
+    assert runner.current().review_index == 2
+    runner.approve([])
+    job = runner.current()
+    assert job.status == "done"
+    assert job.missing_playlist_id == "PL2" and job.notice == GONE_JAZZ
+    assert fake.added == {"PL1": ["a", "b"], "PL2": ["a"], "PL3": ["a"]}
+    assert records.get("PL2") == jazz  # untouched
+    assert list(fake.created) == ["PL1", "PL2", "PL3"]  # not recreated
+
+
+def test_forgetting_the_skipped_playlist_keeps_the_job(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b"))
+    three_playlists(fake, records)
+    fake.deleted_playlists = {"PL2", "PL3"}
+    runner = make_runner(stores, fake, RecordingClassifier({"b": "include"}))
+    runner.start_update(["PL1", "PL2", "PL3"])
+    job = runner.current()
+    assert job.status == "review"
+    assert "“Jazz”" in job.notice and "“Pop”" in job.notice
+    first = job.missing_playlist_id
+    assert first in ("PL2", "PL3")
+
+    runner.forget_playlist(first)
+    job = runner.current()
+    assert job.status == "review"  # not cancelled
+    assert records.get(first) is None
+    second = job.missing_playlist_id
+    assert second in ("PL2", "PL3") and second != first  # the next one to offer
+    runner.forget_playlist(second)
+    assert runner.current().missing_playlist_id is None
+
+    runner.approve(["b"])
+    assert runner.current().status == "done"
+    assert fake.added["PL1"] == ["a", "b"]
+
+
+def test_update_all_playlist_deleted_before_approve_is_skipped(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b"))
+    seed_playlist(fake, records, "PL1", "Rock", included=["a"])
+    seed_playlist(fake, records, "PL2", "Jazz", included=["a"])
+    rock = records.get("PL1")
+    runner = make_runner(stores, fake, RecordingClassifier({"b": "include"}))
+    runner.start_update(["PL1", "PL2"])
+    fake.deleted_playlists = {"PL1"}
+    runner.approve(["b"])
+    job = runner.current()
+    assert job.status == "review" and job.review_index == 1
+    assert job.targets[0].skipped and not job.targets[0].approved
+    assert job.missing_playlist_id == "PL1"
+    assert "“Rock” no longer exists" in job.notice
+    assert records.get("PL1") == rock
+    runner.approve(["b"])
+    assert fake.added == {"PL1": ["a"], "PL2": ["a", "b"]}
+    assert runner.current().status == "done"
+
+
+def test_skipped_missing_playlist_survives_pause_and_resume(stores):
+    records, _ = stores
+    fake = FakeYTMusic(make_songs(150))
+    seed_playlist(fake, records, "PL1", "Rock")
+    seed_playlist(fake, records, "PL2", "Jazz")
+    seed_playlist(fake, records, "PL3", "Pop")
+    fake.deleted_playlists = {"PL1"}
+    runner = make_runner(stores, fake, RecordingClassifier(fail_after=1))
+    runner.start_update(["PL1", "PL2", "PL3"])
+    job = runner.current()
+    assert job.status == "paused" and job.missing_playlist_id == "PL1"
+    runner.classifier.fail_after = None
+    runner.resume()
+    job = runner.current()
+    assert job.status == "review" and job.missing_playlist_id == "PL1"

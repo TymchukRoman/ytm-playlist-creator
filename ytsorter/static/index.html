@@ -164,6 +164,10 @@
       <h1 tabindex="-1" id="review-title">Review</h1>
       <p class="lead">Tick the songs you want. Nothing changes on YouTube Music until you press the button at the bottom.</p>
       <p class="notice" id="review-notice" hidden></p>
+      <div class="row-actions missing-offer" id="review-missing" hidden>
+        <button type="button" class="btn btn-secondary" id="btn-review-forget">Forget this playlist</button>
+        <span class="hint">Removes it from your list here. Nothing on YouTube Music changes.</span>
+      </div>
 
       <section class="group" id="group-include" aria-labelledby="h-include">
         <div class="group-head">
@@ -236,6 +240,10 @@
         <h1 tabindex="-1" id="done-title">All done</h1>
         <p class="lead" id="done-message"></p>
         <p class="notice" id="done-notice" hidden></p>
+        <div class="row-actions missing-offer" id="done-missing" hidden>
+          <button type="button" class="btn btn-secondary" id="btn-done-forget">Forget this playlist</button>
+          <span class="hint">Removes it from your list here. Nothing on YouTube Music changes.</span>
+        </div>
         <p class="error" id="done-error" role="alert" hidden></p>
         <button type="button" class="btn btn-primary btn-big" id="btn-done">Back to your playlists</button>
       </div>

@@ -631,3 +631,21 @@ def test_forget_blocked_for_a_target_of_the_current_job(env):
     assert env.records.get("PL1") is not None and env.records.get("PL2") is not None
     env.runner._job.status = "done"
     assert env.client.delete("/api/playlists/PL1").status_code == 200
+
+
+def test_update_all_missing_playlist_is_skipped_and_forget_keeps_the_job(env):
+    seed_playlist(env.ytm, env.records, "PL1", "Rock")
+    seed_playlist(env.ytm, env.records, "PL2", "Jazz")
+    env.ytm.deleted_playlists.add("PL2")
+    assert env.client.post("/api/update-all").status_code == 200
+    job = env.client.get("/api/job").json()
+    assert job["status"] == "review"
+    assert job["missing_playlist_id"] == "PL2"
+    assert "“Jazz” no longer exists" in job["notice"]
+    assert job["review"]["count"] == 1  # the skipped playlist isn't counted as one to review
+    assert env.client.delete("/api/playlists/PL2").status_code == 200
+    job = env.client.get("/api/job").json()
+    assert job["status"] == "review" and job["missing_playlist_id"] is None
+    assert [p["playlist_id"] for p in env.client.get("/api/playlists").json()] == ["PL1"]
+    assert env.client.post("/api/job/approve", json={"video_ids": ["v0"]}).status_code == 200
+    assert env.client.get("/api/job").json()["status"] == "done"

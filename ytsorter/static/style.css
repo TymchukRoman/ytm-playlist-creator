@@ -197,6 +197,7 @@ textarea:focus, input[type="text"]:focus { border-color: var(--violet); outline:
 ::placeholder { color: var(--muted); opacity: 0.85; }
 
 .row-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.missing-offer { margin-top: 12px; }
 
 /* --- setup ------------------------------------------------------------------------------- */
 

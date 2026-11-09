@@ -48,6 +48,10 @@ def missing_playlist_message(name: str) -> str:
     return f"The playlist “{name}” no longer exists on YouTube Music."
 
 
+def skipped_missing_message(name: str) -> str:
+    return f"The playlist “{name}” no longer exists on YouTube Music, so it was skipped."
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -77,7 +81,8 @@ class Target:
     songs: list[Song] = field(default_factory=list)  # songs to review (Update: only new ones)
     decisions: dict[str, Decision] = field(default_factory=dict)  # Claude's verdicts by video id
     approved: bool = False  # applied: written to YouTube and to the record
-    skipped: bool = False  # left unchanged (no new songs, or the user pressed Skip)
+    skipped: bool = False  # left unchanged (no new songs, the user pressed Skip, or missing)
+    missing: bool = False  # Update all: deleted on YouTube Music, so skipped
     approved_ids: list[str] | None = None  # the user's choice, saved before any write
     created_playlist_id: str | None = None  # Create: set as soon as the playlist exists
     added_ids: list[str] = field(default_factory=list)  # approved ids already added on YouTube
@@ -94,6 +99,7 @@ class Target:
             "decisions": {k: {"verdict": d.verdict, "reason": d.reason} for k, d in self.decisions.items()},
             "approved": self.approved,
             "skipped": self.skipped,
+            "missing": self.missing,
             "approved_ids": self.approved_ids,
             "created_playlist_id": self.created_playlist_id,
             "added_ids": list(self.added_ids),
@@ -109,6 +115,7 @@ class Target:
             decisions={k: Decision(k, v["verdict"], v.get("reason", "")) for k, v in d.get("decisions", {}).items()},
             approved=d.get("approved", False),
             skipped=d.get("skipped", False),
+            missing=d.get("missing", False),
             approved_ids=d.get("approved_ids"),
             created_playlist_id=d.get("created_playlist_id"),
             added_ids=list(d.get("added_ids", [])),
@@ -125,7 +132,9 @@ class Job:
     progress: Progress
     error: str | None = None
     notice: str | None = None
-    missing_playlist_id: str | None = None  # set when an Update target was deleted on YouTube
+    # A target deleted on YouTube: the failure of a single-playlist job, or (Update all) the
+    # skipped playlist to offer "Forget" for while the job goes on.
+    missing_playlist_id: str | None = None
     fetched: bool = False  # liked songs fetched and split into targets
 
     def to_dict(self) -> dict:
@@ -253,7 +262,8 @@ class JobRunner:
             job = self._require("paused", "failed")
             job.status = "applying" if self._apply_pending(job) else "running"
             job.error = None
-            job.missing_playlist_id = None
+            if not self._missing_is_skipped(job):
+                job.missing_playlist_id = None  # it is retried (and reported again if still gone)
             self.jobs.save(job)
         self._run_in_background(lambda: self._work(job))
 
@@ -271,6 +281,12 @@ class JobRunner:
                     and any(t.playlist_id == playlist_id for t in job.targets)):
                 raise JobBusyError(IN_JOB_MSG)
             self.records.delete(playlist_id)
+            if job is not None and job.missing_playlist_id == playlist_id and self._missing_is_skipped(job):
+                # Update all goes on; offer the next deleted playlist, if any (no cancel).
+                job.missing_playlist_id = next(
+                    (t.playlist_id for t in job.targets if t.missing and t.playlist_id != playlist_id
+                     and self.records.get(t.playlist_id) is not None), None)
+                self.jobs.save(job)
 
     # --- helpers (callers of _commit/_advance hold the lock) ------------------------------
 
@@ -300,6 +316,24 @@ class JobRunner:
         self.jobs.save(job)
 
     @staticmethod
+    def _missing_is_skipped(job: Job) -> bool:
+        """The missing playlist was skipped (Update all) rather than being what stopped the job."""
+        return job.missing_playlist_id is not None and any(
+            t.missing and t.playlist_id == job.missing_playlist_id for t in job.targets)
+
+    def _skip_missing(self, job: Job, t: Target) -> None:
+        """Update all: leave a deleted playlist alone and carry on with the others."""
+        t.skipped = t.missing = True
+        if job.missing_playlist_id is None:
+            job.missing_playlist_id = t.playlist_id
+        text = skipped_missing_message(t.name)
+        if not job.notice:
+            job.notice = text
+        else:
+            job.notice = job.notice + (" " if job.notice.endswith((".", "!", "?")) else ". ") + text
+        self._commit(job)
+
+    @staticmethod
     def _apply_pending(job: Job) -> bool:
         if job.review_index >= len(job.targets):
             return False
@@ -324,7 +358,8 @@ class JobRunner:
                 return
             job.status = status
             job.error = error
-            job.missing_playlist_id = missing_id
+            if missing_id is not None:  # otherwise keep a skipped missing playlist's id
+                job.missing_playlist_id = missing_id
             self.jobs.save(job)
 
     # --- background work --------------------------------------------------------------------
@@ -332,7 +367,14 @@ class JobRunner:
     def _work(self, job: Job) -> None:
         try:
             if self._apply_pending(job):
-                self._apply(job, job.targets[job.review_index])
+                target = job.targets[job.review_index]
+                try:
+                    self._apply(job, target)
+                except _PlaylistGone:
+                    if len(job.targets) == 1 or target.playlist_id is None:
+                        raise
+                    with self._lock:  # deleted after the review: skip it, go on with the others
+                        self._skip_missing(job, target)
                 with self._lock:
                     self._advance(job)
             else:
@@ -389,7 +431,14 @@ class JobRunner:
             if t.skipped or t.is_classified():
                 continue
             if t.playlist_id is not None and not self.ytm.playlist_exists(t.playlist_id):
-                raise _PlaylistGone(t)
+                if not many:
+                    raise _PlaylistGone(t)
+                with self._lock:
+                    if self._job is not job:
+                        raise _Cancelled()
+                    t.songs = []  # never reviewed: not counted in "Playlist i of n"
+                    self._skip_missing(job, t)
+                continue
             prefix = f"{t.name}: " if many else ""
             with self._lock:
                 work = dict(t.decisions)  # classify_pending mutates this copy, not the shared job
