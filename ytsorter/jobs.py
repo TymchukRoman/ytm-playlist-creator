@@ -19,6 +19,7 @@ from typing import Literal
 from .classify import BATCH_SIZE, classify_pending
 from .claude_cli import UNANSWERED_REASON, ClaudeAuthError, ClaudeTemporaryError, ClaudeUsageLimitError
 from .models import Decision, PlaylistRecord, Song, SongEntry
+from .song_cache import SongCache
 from .store import JobStore, RecordStore
 from .ytm import PlaylistMissingError, YouTubeAuthError
 
@@ -32,6 +33,15 @@ NO_NEW_SONGS = "No new liked songs since last update"
 NO_LIKED_SONGS = "You don't have any liked songs yet."
 FETCH_MSG = "Fetching your liked songs…"
 CLASSIFY_MSG = "Asking Claude which songs fit…"
+TOPIC_MSG = "Working out what this playlist is about…"
+
+
+def cached_fits_reason(topic: str) -> str:
+    return f"An earlier scan tagged it “{topic}”"
+
+
+def cached_not_reason(topic: str) -> str:
+    return f"An earlier scan found it isn't “{topic}”"
 NAME_MAX = 150  # YouTube Music's limit for a playlist title
 BAD_NAME_MSG = "Playlist names can't contain < or > and must be 150 characters or fewer."
 DESCRIPTION_MAX = 5000  # YouTube Music's limit for a playlist description
@@ -94,6 +104,9 @@ class Target:
     approved_ids: list[str] | None = None  # the user's choice, saved before any write
     created_playlist_id: str | None = None  # Create: set as soon as the playlist exists
     added_ids: list[str] = field(default_factory=list)  # approved ids already added on YouTube
+    topic: str | None = None  # the playlist's one-tag topic, when it has one (see song_cache)
+    topic_known: bool = False  # topic worked out (or taken from the record)
+    recheck: bool = False  # Create: ask Claude about every song, ignoring what earlier scans learned
 
     def is_classified(self) -> bool:
         return all(s.video_id in self.decisions for s in self.songs)
@@ -104,13 +117,17 @@ class Target:
             "name": self.name,
             "description": self.description,
             "songs": [s.to_dict() for s in self.songs],
-            "decisions": {k: {"verdict": d.verdict, "reason": d.reason} for k, d in self.decisions.items()},
+            "decisions": {k: {"verdict": d.verdict, "reason": d.reason, "tags": list(d.tags), "cached": d.cached}
+                          for k, d in self.decisions.items()},
             "approved": self.approved,
             "skipped": self.skipped,
             "missing": self.missing,
             "approved_ids": self.approved_ids,
             "created_playlist_id": self.created_playlist_id,
             "added_ids": list(self.added_ids),
+            "topic": self.topic,
+            "topic_known": self.topic_known,
+            "recheck": self.recheck,
         }
 
     @classmethod
@@ -120,13 +137,17 @@ class Target:
             name=d["name"],
             description=d.get("description", ""),
             songs=[Song.from_dict(s) for s in d.get("songs", [])],
-            decisions={k: Decision(k, v["verdict"], v.get("reason", "")) for k, v in d.get("decisions", {}).items()},
+            decisions={k: Decision(k, v["verdict"], v.get("reason", ""), list(v.get("tags", [])), v.get("cached", False))
+                       for k, v in d.get("decisions", {}).items()},
             approved=d.get("approved", False),
             skipped=d.get("skipped", False),
             missing=d.get("missing", False),
             approved_ids=d.get("approved_ids"),
             created_playlist_id=d.get("created_playlist_id"),
             added_ids=list(d.get("added_ids", [])),
+            topic=d.get("topic"),
+            topic_known=d.get("topic_known", False),
+            recheck=d.get("recheck", False),
         )
 
 
@@ -204,8 +225,10 @@ class JobRunner:
     """
 
     def __init__(self, records: RecordStore, jobs: JobStore, ytm, classifier,
-                 run_in_background: Callable[[Callable[[], None]], None] = _start_thread):
+                 run_in_background: Callable[[Callable[[], None]], None] = _start_thread,
+                 songs: SongCache | None = None):
         self.records = records
+        self.songs = songs if songs is not None else SongCache(None)
         self.jobs = jobs
         self.ytm = ytm
         self.classifier = classifier
@@ -223,10 +246,11 @@ class JobRunner:
         with self._lock:
             return copy.deepcopy(self._job)
 
-    def start_create(self, name: str, description: str) -> Job:
+    def start_create(self, name: str, description: str, recheck: bool = False) -> Job:
+        """`recheck`: ask Claude about every song, ignoring what earlier scans learned."""
         check_playlist_name(name)
         check_playlist_description(description)
-        return self._start("create", [Target(None, name, description)])
+        return self._start("create", [Target(None, name, description, recheck=recheck)])
 
     def start_update(self, playlist_ids: list[str]) -> Job:
         if not playlist_ids:
@@ -236,7 +260,8 @@ class JobRunner:
             record = self.records.get(pid)
             if record is None:
                 raise KeyError(pid)
-            targets.append(Target(pid, record.name, record.description))
+            targets.append(Target(pid, record.name, record.description,
+                                  topic=record.topic, topic_known=record.topic_known))
         return self._start("update", targets)
 
     def approve(self, video_ids: list[str]) -> None:
@@ -290,6 +315,7 @@ class JobRunner:
                     and any(t.playlist_id == playlist_id for t in job.targets)):
                 raise JobBusyError(IN_JOB_MSG)
             self.records.delete(playlist_id)
+            self.songs.forget_playlist(playlist_id)
             if job is not None and job.missing_playlist_id == playlist_id and self._missing_is_skipped(job):
                 # Update all goes on; offer the next deleted playlist, if any (no cancel).
                 job.missing_playlist_id = next(
@@ -451,6 +477,7 @@ class JobRunner:
                     self._skip_missing(job, t)
                 continue
             prefix = f"{t.name}: " if many else ""
+            self._use_song_cache(job, t, prefix)
             with self._lock:
                 work = dict(t.decisions)  # classify_pending mutates this copy, not the shared job
                 pending = sum(1 for s in t.songs if s.video_id not in work)
@@ -468,6 +495,57 @@ class JobRunner:
             classify_pending(t.description, t.songs, work, self.classifier, on_batch_done)
         with self._lock:
             self._advance(job)  # -> review of the first target not skipped
+
+    def _use_song_cache(self, job: Job, t: Target, prefix: str) -> None:
+        """Work out the playlist's topic once, then decide the songs earlier scans already settled."""
+        if not t.topic_known:
+            with self._lock:
+                job.progress = Progress("classify", prefix + TOPIC_MSG)
+                self._commit(job)
+            topic_for = getattr(self.classifier, "topic_for", None)
+            topic = topic_for(t.description, self.songs.vocabulary()) if topic_for else None
+            with self._lock:
+                if self._job is not job:
+                    raise _Cancelled()
+                t.topic, t.topic_known = topic, True
+                self._commit(job)
+        if not t.topic or t.recheck:
+            return
+        known: dict[str, Decision] = {}
+        for s in t.songs:
+            if s.video_id in t.decisions:
+                continue
+            k = self.songs.get(s.video_id)
+            if k is None:
+                continue
+            if t.topic in k.tags:
+                known[s.video_id] = Decision(s.video_id, "include", cached_fits_reason(t.topic), cached=True)
+            elif t.topic in k.surely_not:
+                known[s.video_id] = Decision(s.video_id, "exclude", cached_not_reason(t.topic), cached=True)
+        if known:
+            with self._lock:
+                if self._job is not job:
+                    raise _Cancelled()
+                t.decisions.update(known)
+                self._commit(job)
+
+    def _learn(self, t: Target, chosen: set[str], playlist_id: str) -> None:
+        """Remember what this review settled about each song, for later playlists.
+
+        Claude's tags are kept. With a topic, a ticked song fits it (the user's tick corrects an
+        earlier "isn't"), and a song Claude excluded and the user left unticked surely doesn't.
+        """
+        for s in t.songs:
+            d = t.decisions.get(s.video_id)
+            checked = s.video_id in chosen
+            fits = t.topic if checked else None
+            not_fits = t.topic if not checked and d is not None and d.verdict == "exclude" else None
+            # The verdict on this playlist's own topic wins over a tag Claude gave in passing: an
+            # "unsure" song tagged with the topic must not count as surely fitting next time.
+            tags = [x for x in (d.tags if d else []) if x != t.topic]
+            self.songs.learn(s.video_id, tags=tags, fits=fits, not_fits=not_fits,
+                             playlist_id=playlist_id if checked else None)
+        self.songs.save()
 
     def _entry(self, t: Target, s: Song, checked: bool) -> SongEntry:
         d = t.decisions.get(s.video_id) or Decision(s.video_id, "unsure", UNANSWERED_REASON)
@@ -554,7 +632,10 @@ class JobRunner:
                 continue  # Claude never judged it: leave it unrecorded so the next Update asks again
             self._put(record, s.video_id, self._entry(t, s, checked), checked)
         record.updated_at = _now()
+        if t.topic_known:
+            record.topic, record.topic_known = t.topic, True
         self.records.save(record)
+        self._learn(t, chosen, pid)
         with self._lock:
             if self._job is not job:
                 raise _Cancelled()

@@ -25,8 +25,9 @@ from .claude_cli import ClaudeClassifier
 from .fakes import FakeYTMusic
 from .jobs import Job, JobBusyError, JobRunner, JobStateError, Target
 from .models import Song
-from .paths import data_dir, job_file, playlists_dir, settings_file, youtube_auth_file
+from .paths import data_dir, job_file, playlists_dir, settings_file, songs_file, youtube_auth_file
 from .settings import BAD_SETTINGS_MSG, ClaudeSettings, SettingsStore, options_json
+from .song_cache import SongCache
 from .store import JobStore, RecordStore
 from .ytm import YouTubeAuthError, YTMusicClient
 
@@ -44,6 +45,7 @@ class ConnectBody(BaseModel):
 class CreateBody(BaseModel):
     name: str
     description: str
+    recheck: bool = False  # ignore what earlier scans learned about songs
 
 
 class ApproveBody(BaseModel):
@@ -226,7 +228,7 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
         if not description:
             return _error(400, "Describe which songs belong in the playlist.")
         try:
-            runner.start_create(name, description)
+            runner.start_create(name, description, recheck=body.recheck)
         except ValueError as exc:  # a name YouTube Music would refuse
             return _error(400, str(exc))
         return {"started": True}
@@ -305,11 +307,12 @@ def build_default_app() -> FastAPI:
         base = data_dir() / "demo"
         shutil.rmtree(base, ignore_errors=True)  # demo only: records must match the fresh fake library
         records, jobs = RecordStore(base / "playlists"), JobStore(base / "job.json")
-        settings = SettingsStore(base / "settings.json")
+        settings, songs = SettingsStore(base / "settings.json"), SongCache(base / "songs.json")
         ytm, classifier = FakeYTMusic(list(demo_data.SAMPLE_SONGS)), demo_data.DemoClassifier()
     else:
         records, jobs = RecordStore(playlists_dir()), JobStore(job_file())
-        settings = SettingsStore(settings_file())
-        ytm, classifier = YTMusicClient(youtube_auth_file()), ClaudeClassifier(settings=settings.load)
-    runner = JobRunner(records, jobs, ytm, classifier)  # real background threads
+        settings, songs = SettingsStore(settings_file()), SongCache(songs_file())
+        ytm = YTMusicClient(youtube_auth_file())
+        classifier = ClaudeClassifier(settings=settings.load, known_tags=songs.vocabulary)
+    runner = JobRunner(records, jobs, ytm, classifier, songs=songs)  # real background threads
     return create_app(runner, ytm, classifier, records, demo=demo, settings=settings)

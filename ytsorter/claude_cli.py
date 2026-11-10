@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from . import paths
 from .models import Decision, Song
 from .settings import ClaudeSettings
+from .song_cache import normalize_tag, normalize_tags
 
 # runner(args, stdin_text) for a classify call; runner(args, stdin_text, timeout=...) for the status check.
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -23,12 +24,14 @@ STATUS_SLOW_MSG = (f"Checking whether Claude is logged in took too long. {LOGIN_
                    "then press Check again.")
 CLASSIFY_TIMEOUT = 300  # seconds for one batch
 STATUS_TIMEOUT = 20  # seconds for `claude auth status`
-_JSON_SHAPE = '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"..."}]}'
+_JSON_SHAPE = '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"...","tags":["..."]}]}'
 _VERDICTS = ("include", "exclude", "unsure")
 
 SYSTEM_PROMPT = (
     "You sort a user's liked songs into a playlist they described. "
     "Judge only from the metadata given for each song and your own knowledge of the music. "
+    "Many Japanese, Korean and Chinese songs are anime, drama or game theme songs: use what you know "
+    "about tie-ins, including romanized or translated titles. "
     "If you cannot tell whether a song fits, answer 'unsure' rather than guess. "
     "Keep each reason to 15 words or fewer. "
     "Return exactly one decision per song number."
@@ -37,8 +40,16 @@ SYSTEM_PROMPT = (
 SCHEMA_JSON = (
     '{"type":"object","properties":{"decisions":{"type":"array","items":{"type":"object",'
     '"properties":{"n":{"type":"integer"},"verdict":{"enum":["include","exclude","unsure"]},'
-    '"reason":{"type":"string"}},"required":["n","verdict","reason"]}}},"required":["decisions"]}'
+    '"reason":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}},'
+    '"required":["n","verdict","reason","tags"]}}},"required":["decisions"]}'
 )
+
+TOPIC_SYSTEM_PROMPT = (
+    "You turn a playlist description into a single song tag, or none. "
+    "A tag names what a song is, like a language, a genre, a country, or a kind of song "
+    "such as 'anime opening'. Answer with only the JSON object asked for."
+)
+TOPIC_SCHEMA_JSON = '{"type":"object","properties":{"topic":{"type":["string","null"]}},"required":["topic"]}'
 
 
 class ClaudeError(Exception):
@@ -78,7 +89,13 @@ def default_runner(args: list[str], stdin_text: str, timeout: float = CLASSIFY_T
     )
 
 
-def _build_prompt(description: str, songs: list[Song]) -> str:
+def _known_tags_line(known_tags: list[str]) -> str:
+    if not known_tags:
+        return ""
+    return f"Tags already in use (reuse one whenever it means the same): {json.dumps(known_tags, ensure_ascii=False)}\n"
+
+
+def _build_prompt(description: str, songs: list[Song], known_tags: list[str] = ()) -> str:
     items = [
         {"n": i, "title": s.title, "artists": s.artists, "album": s.album, "duration": s.duration}
         for i, s in enumerate(songs, start=1)
@@ -87,6 +104,10 @@ def _build_prompt(description: str, songs: list[Song]) -> str:
         f"Playlist description: {description}\n\n"
         "For each numbered song below, decide whether it belongs in that playlist "
         "(include, exclude or unsure) and give a short reason. "
+        "Also give 1 to 6 short lowercase tags describing the song itself, whatever the playlist: "
+        "its language, genre, origin and kind (for example 'japanese', 'j-rock', 'anime opening', 'naruto'). "
+        "Leave tags empty for a song you don't know.\n"
+        f"{_known_tags_line(list(known_tags))}"
         f"Answer with only a JSON object of this exact shape: {_JSON_SHAPE}\n"
         "Songs as a JSON array:\n"
         f"{json.dumps(items, ensure_ascii=False)}"
@@ -133,8 +154,8 @@ def _raise_for_error_envelope(envelope: dict) -> None:
     raise ClaudeError(text or "Claude CLI reported an error")
 
 
-def _extract_decisions(proc: subprocess.CompletedProcess) -> list | None:
-    """Return the raw decision list, or None if the response is unusable.
+def _extract_payload(proc: subprocess.CompletedProcess, key: str, kind: type | None = None) -> dict | None:
+    """Return Claude's JSON object holding `key`, or None if the response is unusable.
 
     Raises ClaudeError (or a subclass) for error envelopes and for a failed process
     whose stdout carries no envelope at all.
@@ -149,18 +170,25 @@ def _extract_decisions(proc: subprocess.CompletedProcess) -> list | None:
     if envelope.get("is_error"):
         _raise_for_error_envelope(envelope)
 
+    def usable(payload: object) -> bool:
+        return isinstance(payload, dict) and key in payload and (kind is None or isinstance(payload[key], kind))
+
     payload = envelope.get("structured_output")
-    if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
+    if not usable(payload):
         result = envelope.get("result")
         payload = _parse_json_text(result) if isinstance(result, str) else None
-    if not isinstance(payload, dict) or not isinstance(payload.get("decisions"), list):
-        return None
-    return payload["decisions"]
+    return payload if usable(payload) else None
 
 
-def _valid_decisions(raw: list, count: int) -> dict[int, tuple[str, str]]:
-    """Map n -> (verdict, reason), keeping the first of duplicates, dropping invalid entries."""
-    found: dict[int, tuple[str, str]] = {}
+def _extract_decisions(proc: subprocess.CompletedProcess) -> list | None:
+    """Return the raw decision list, or None if the response is unusable."""
+    payload = _extract_payload(proc, "decisions", list)
+    return payload["decisions"] if payload is not None else None
+
+
+def _valid_decisions(raw: list, count: int) -> dict[int, tuple[str, str, list[str]]]:
+    """Map n -> (verdict, reason, tags), keeping the first of duplicates, dropping invalid entries."""
+    found: dict[int, tuple[str, str, list[str]]] = {}
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -169,17 +197,19 @@ def _valid_decisions(raw: list, count: int) -> dict[int, tuple[str, str]]:
             continue
         if verdict not in _VERDICTS or n in found:
             continue
-        found[n] = (verdict, str(item.get("reason") or ""))
+        found[n] = (verdict, str(item.get("reason") or ""), normalize_tags(item.get("tags")))
     return found
 
 
 class ClaudeClassifier:
     def __init__(self, runner: Runner = default_runner, executable: str | None = None, model: str = "sonnet",
-                 settings: Callable[[], ClaudeSettings] | None = None):
+                 settings: Callable[[], ClaudeSettings] | None = None,
+                 known_tags: Callable[[], list[str]] | None = None):
         """`settings`, when given, is read on every call, so a changed choice applies to the next batch."""
         self._runner = runner
         self._executable = executable
         self._settings = settings or (lambda: ClaudeSettings(model))
+        self._known_tags = known_tags or (lambda: [])
 
     def _exe(self) -> str | None:
         return self._executable or shutil.which("claude")
@@ -209,17 +239,49 @@ class ClaudeClassifier:
             return ClaudeStatus(True, False, TOO_OLD_MSG)
         return ClaudeStatus(True, False, NOT_LOGGED_IN_MSG)
 
-    def _ask(self, exe: str, description: str, songs: list[Song]) -> dict[int, tuple[str, str]]:
-        """One CLI call for `songs`; returns decisions keyed by 1-based position (possibly empty)."""
+    def _args(self, exe: str, system_prompt: str, schema: str) -> list[str]:
         choice = self._settings()
         args = [
             exe, "-p", "--tools", "", "--no-session-persistence", "--output-format", "json",
-            "--model", choice.model, "--system-prompt", SYSTEM_PROMPT, "--json-schema", SCHEMA_JSON,
+            "--model", choice.model, "--system-prompt", system_prompt, "--json-schema", schema,
             "--setting-sources", "project", "--strict-mcp-config",
         ]  # fmt: skip
         if choice.effort != "default":
             args += ["--effort", choice.effort]
-        proc = self._run(args, _build_prompt(description, songs))
+        return args
+
+    def topic_for(self, description: str, known_tags: list[str]) -> str | None:
+        """The one song tag the description amounts to ("k-pop"), or None when it is subtler.
+
+        None also when the answer can't be read: the job then simply asks Claude about every
+        song, as before. Usage-limit and sign-in errors still raise, so the job pauses.
+        """
+        exe = self._exe()
+        if not exe:
+            raise ClaudeError("Claude CLI is not installed (`claude` not found on PATH)")
+        prompt = (
+            f"Playlist description: {description}\n"
+            f"{_known_tags_line(list(known_tags))}"
+            "If the songs that fit this description are exactly the songs with one tag (for example "
+            "'k-pop', 'ukrainian', 'anime opening'), answer that tag, reusing a tag already in use when it "
+            "means the same. If the description combines conditions, leaves things out, or depends on mood, "
+            "era, tempo or taste, answer null.\n"
+            'Answer with only a JSON object of this exact shape: {"topic": "<tag>" or null}'
+        )
+        try:
+            proc = self._run(self._args(exe, TOPIC_SYSTEM_PROMPT, TOPIC_SCHEMA_JSON), prompt)
+            payload = _extract_payload(proc, "topic")
+        except (ClaudeUsageLimitError, ClaudeAuthError):
+            raise
+        except ClaudeError:
+            return None
+        topic = normalize_tag(payload.get("topic")) if payload else ""
+        return topic or None
+
+    def _ask(self, exe: str, description: str, songs: list[Song]) -> dict[int, tuple[str, str, list[str]]]:
+        """One CLI call for `songs`; returns decisions keyed by 1-based position (possibly empty)."""
+        args = self._args(exe, SYSTEM_PROMPT, SCHEMA_JSON)
+        proc = self._run(args, _build_prompt(description, songs, self._known_tags()))
         raw = _extract_decisions(proc)
         return _valid_decisions(raw, len(songs)) if raw is not None else {}
 
@@ -238,7 +300,7 @@ class ClaudeClassifier:
         if not exe:
             raise ClaudeError("Claude CLI is not installed (`claude` not found on PATH)")
 
-        decided: dict[int, tuple[str, str]] = {}  # index into `songs` -> (verdict, reason)
+        decided: dict[int, tuple[str, str, list[str]]] = {}  # index into `songs` -> (verdict, reason, tags)
         pending = list(range(len(songs)))
         for _attempt in range(2):
             answers = self._ask(exe, description, [songs[i] for i in pending])

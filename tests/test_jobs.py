@@ -898,3 +898,152 @@ def test_start_create_rejects_a_description_over_5000_characters(stores):
     assert runner.current() is None and clf.sent == []
     runner.start_create("Rock", "x" * 5000)
     assert runner.current().status == "review"
+
+
+# --- What earlier scans learned about songs (song cache) ---------------------------------------
+
+from ytsorter.jobs import cached_fits_reason, cached_not_reason  # noqa: E402
+from ytsorter.song_cache import SongCache  # noqa: E402
+
+
+def cache_runner(stores, ytm, classifier, cache):
+    records, jobs = stores
+    return JobRunner(records, jobs, ytm, classifier, run_in_background=sync, songs=cache)
+
+
+def test_create_learns_tags_topic_and_playlist(stores, tmp_path):
+    cache = SongCache(tmp_path / "songs.json")
+    fake = FakeYTMusic(songs("a", "b", "c", "d"))
+    clf = RecordingClassifier({"a": "include", "b": "include", "c": "unsure"}, topic="k-pop",
+                              tags=lambda s: ["korean"] if s.video_id in ("a", "b") else ["rock"])
+    runner = cache_runner(stores, fake, clf, cache)
+    runner.start_create("K-pop", "K-pop songs only")
+    assert clf.topic_calls == [("K-pop songs only", [])]
+    runner.approve(["a", "c"])  # b unticked by the user, c (unsure) ticked in
+    pid = next(iter(fake.created))
+    again = SongCache(tmp_path / "songs.json")
+    assert again.get("a").tags == ["korean", "k-pop"] and again.get("a").playlists == [pid]
+    assert again.get("b").tags == ["korean"] and again.get("b").surely_not == []  # user's untick: not a verdict
+    assert again.get("c").tags == ["rock", "k-pop"]
+    assert again.get("d").surely_not == ["k-pop"]  # Claude excluded, left unticked
+    rec = stores[0].get(pid)
+    assert (rec.topic, rec.topic_known) == ("k-pop", True)
+
+
+def test_create_uses_what_earlier_scans_learned(stores):
+    cache = SongCache(None)
+    cache.learn("a", fits="k-pop")
+    cache.learn("b", not_fits="k-pop")
+    cache.learn("c", tags=["korean"])  # tags alone don't settle it: Claude is asked
+    fake = FakeYTMusic(songs("a", "b", "c", "d"))
+    clf = RecordingClassifier({"c": "include"}, topic="k-pop")
+    runner = cache_runner(stores, fake, clf, cache)
+    runner.start_create("K-pop", "kpop")
+    assert sorted(clf.sent) == ["c", "d"]
+    t = runner.current().targets[0]
+    assert (t.decisions["a"].verdict, t.decisions["a"].reason, t.decisions["a"].cached) == (
+        "include", cached_fits_reason("k-pop"), True)
+    assert (t.decisions["b"].verdict, t.decisions["b"].reason) == ("exclude", cached_not_reason("k-pop"))
+    assert {s.video_id for s in t.songs} == {"a", "b", "c", "d"}  # the review still shows every song
+
+
+def test_ticking_a_cached_not_corrects_the_cache(stores):
+    cache = SongCache(None)
+    cache.learn("a", not_fits="anime opening")  # an earlier mistake
+    fake = FakeYTMusic(songs("a", "b"))
+    runner = cache_runner(stores, fake, RecordingClassifier({"b": "include"}, topic="anime opening"), cache)
+    runner.start_create("Openings", "anime openings")
+    runner.approve(["a", "b"])
+    assert "anime opening" in cache.get("a").tags and cache.get("a").surely_not == []
+
+
+def test_recheck_asks_claude_about_every_song_and_overrides_the_cache(stores):
+    cache = SongCache(None)
+    cache.learn("a", not_fits="anime opening")
+    fake = FakeYTMusic(songs("a", "b"))
+    clf = RecordingClassifier({"a": "include", "b": "include"}, topic="anime opening")
+    runner = cache_runner(stores, fake, clf, cache)
+    runner.start_create("Openings", "anime openings", recheck=True)
+    assert sorted(clf.sent) == ["a", "b"]
+    runner.approve(["a", "b"])
+    assert cache.get("a").surely_not == [] and "anime opening" in cache.get("a").tags
+
+
+def test_no_topic_means_no_shortcuts(stores):
+    cache = SongCache(None)
+    cache.learn("a", fits="k-pop")
+    clf = RecordingClassifier(topic=None)
+    runner = cache_runner(stores, FakeYTMusic(songs("a", "b")), clf, cache)
+    runner.start_create("Rainy", "Chill songs for rainy evenings")
+    assert sorted(clf.sent) == ["a", "b"]
+
+
+def test_cancel_learns_nothing(stores):
+    cache = SongCache(None)
+    clf = RecordingClassifier({"a": "include"}, topic="k-pop", tags=lambda s: ["korean"])
+    runner = cache_runner(stores, FakeYTMusic(songs("a", "b")), clf, cache)
+    runner.start_create("K-pop", "kpop")
+    runner.cancel()
+    assert cache.get("a") is None and cache.get("b") is None
+
+
+def test_update_reuses_the_saved_topic_and_the_cache(stores):
+    records, _ = stores
+    cache = SongCache(None)
+    fake = FakeYTMusic(songs("a", "b", "c"))
+    rec = seed_playlist(fake, records, "PL1", "K-pop", included=["a"])
+    rec.topic, rec.topic_known = "k-pop", True
+    records.save(rec)
+    cache.learn("b", not_fits="k-pop")
+    clf = RecordingClassifier({"c": "include"}, topic="never asked")
+    runner = cache_runner(stores, fake, clf, cache)
+    runner.start_update(["PL1"])
+    assert clf.topic_calls == [] and clf.sent == ["c"]
+    runner.approve(["c"])
+    assert fake.added["PL1"] == ["a", "c"]
+    assert "k-pop" in cache.get("c").tags and cache.get("c").playlists == ["PL1"]
+
+
+def test_update_of_an_older_playlist_works_out_its_topic_once(stores):
+    records, _ = stores
+    fake = FakeYTMusic(songs("a", "b"))
+    seed_playlist(fake, records, "PL1", "Rock", included=["a"])  # made before tags existed
+    clf = RecordingClassifier({"b": "include"}, topic="rock")
+    runner = cache_runner(stores, fake, clf, SongCache(None))
+    runner.start_update(["PL1"])
+    assert len(clf.topic_calls) == 1
+    runner.approve(["b"])
+    assert (records.get("PL1").topic, records.get("PL1").topic_known) == ("rock", True)
+
+
+def test_forget_playlist_drops_it_from_the_cache(stores):
+    records, _ = stores
+    cache = SongCache(None)
+    fake = FakeYTMusic(songs("a"))
+    seed_playlist(fake, records, "PL1", "Rock", included=["a"])
+    cache.learn("a", playlist_id="PL1")
+    cache_runner(stores, fake, RecordingClassifier(), cache).forget_playlist("PL1")
+    assert cache.get("a").playlists == []
+
+
+def test_topic_survives_a_restart_mid_classify(stores):
+    cache = SongCache(None)
+    clf = RecordingClassifier(topic="k-pop", fail_after=0)  # topic answered, first batch hits the limit
+    runner = cache_runner(stores, FakeYTMusic(songs("a")), clf, cache)
+    runner.start_create("K-pop", "kpop")
+    assert runner.current().status == "paused"
+    records, jobs = stores
+    clf2 = RecordingClassifier(topic="other")
+    again = JobRunner(records, JobStore(jobs.path), FakeYTMusic(songs("a")), clf2, run_in_background=sync, songs=cache)
+    again.resume()
+    assert clf2.topic_calls == [] and again.current().targets[0].topic == "k-pop"
+
+
+def test_unsure_song_tagged_with_the_topic_is_not_learned_as_fitting(stores):
+    cache = SongCache(None)
+    clf = RecordingClassifier({"a": "unsure", "b": "include"}, topic="k-pop", tags=lambda s: ["korean", "k-pop"])
+    runner = cache_runner(stores, FakeYTMusic(songs("a", "b")), clf, cache)
+    runner.start_create("K-pop", "kpop")
+    runner.approve(["b"])  # a left unticked
+    assert cache.get("a").tags == ["korean"] and cache.get("a").surely_not == []
+    assert cache.get("b").tags == ["korean", "k-pop"]

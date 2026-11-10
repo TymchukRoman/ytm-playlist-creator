@@ -18,12 +18,23 @@ def _default_rule(description: str, song: Song) -> tuple[Verdict, str]:
 
 
 class FakeClassifier:
-    """Stands in for ClaudeClassifier. `fail_after=N` raises a usage-limit error on batch N+1."""
+    """Stands in for ClaudeClassifier. `fail_after=N` raises a usage-limit error on batch N+1.
 
-    def __init__(self, rules: Rules | None = None, fail_after: int | None = None):
+    `topic` is what topic_for() answers; `tags(song)` gives each decision's tags.
+    """
+
+    def __init__(self, rules: Rules | None = None, fail_after: int | None = None,
+                 topic: str | None = None, tags: Callable[[Song], list[str]] | None = None):
         self.rules = rules or _default_rule
         self.fail_after = fail_after
         self.batches = 0
+        self.topic = topic
+        self.tags = tags
+        self.topic_calls: list[tuple[str, list[str]]] = []
+
+    def topic_for(self, description: str, known_tags: list[str]) -> str | None:
+        self.topic_calls.append((description, list(known_tags)))
+        return self.topic
 
     def status(self) -> ClaudeStatus:
         return ClaudeStatus(True, True, "ok")
@@ -35,7 +46,7 @@ class FakeClassifier:
         decisions = []
         for song in songs:
             verdict, reason = self.rules(description, song)
-            decisions.append(Decision(song.video_id, verdict, reason))
+            decisions.append(Decision(song.video_id, verdict, reason, list(self.tags(song)) if self.tags else []))
         return decisions
 
 

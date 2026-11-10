@@ -267,6 +267,9 @@ textarea:focus, input[type="text"]:focus, select:focus { border-color: var(--vio
 .create > label { margin-top: 20px; }
 .create .btn-big { margin-top: 24px; }
 .claude-choice { margin-top: 20px; }
+.check-line { display: flex; gap: 10px; align-items: flex-start; margin-top: 20px; font-weight: 600; cursor: pointer; }
+.check-line input { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--violet); }
+.check-line .hint { display: block; font-weight: 400; }
 .claude-choice summary { cursor: pointer; color: var(--muted); font-weight: 600; width: fit-content; }
 .claude-choice summary span { color: var(--ink); }
 .choice-body { margin-top: 12px; display: grid; gap: 12px; }

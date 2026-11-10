@@ -411,11 +411,39 @@ def demo_rule(description: str, song: Song) -> tuple[Verdict, str]:
     return "exclude", f"It's {_LABEL.get(tag, 'something else')}"
 
 
+# Song tags the pretend Claude gives each sample song, and the one-tag topics it recognises.
+_SONG_TAGS = {
+    "anime-opening": ["japanese", "anime opening"],
+    "anime-other": ["japanese", "anime"],
+    "k-pop": ["korean", "k-pop"],
+    "rock": ["rock"],
+    "ukrainian": ["ukrainian"],
+    "other": [],
+}
+_TOPICS = {"anime-opening": "anime opening", "k-pop": "k-pop", "rock": "rock", "ukrainian": "ukrainian"}
+
+
+def demo_tags(song: Song) -> list[str]:
+    return list(_SONG_TAGS.get(TAGS.get(song.video_id, "other"), []))
+
+
+def demo_topic(description: str) -> str | None:
+    """A topic when the description asks for exactly one known kind of song."""
+    wanted, _borderline = _wanted(description)
+    if len(wanted) != 1:
+        return None
+    return _TOPICS.get(next(iter(wanted)))
+
+
 class DemoClassifier(FakeClassifier):
     """FakeClassifier with demo_rule that pauses briefly per batch so progress is visible."""
 
     def __init__(self):
-        super().__init__(rules=demo_rule)
+        super().__init__(rules=demo_rule, tags=demo_tags)
+
+    def topic_for(self, description: str, known_tags: list[str]) -> str | None:
+        self.topic = demo_topic(description)
+        return super().topic_for(description, known_tags)
 
     def classify_batch(self, description: str, songs: list[Song]) -> list[Decision]:
         if BATCH_DELAY:

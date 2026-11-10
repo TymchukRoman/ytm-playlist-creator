@@ -26,6 +26,10 @@ def job_file() -> Path:
     return data_dir() / "job.json"
 
 
+def songs_file() -> Path:
+    return data_dir() / "songs.json"
+
+
 def settings_file() -> Path:
     return data_dir() / "settings.json"
 

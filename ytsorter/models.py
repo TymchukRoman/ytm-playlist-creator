@@ -39,6 +39,8 @@ class Decision:
     video_id: str
     verdict: Verdict
     reason: str
+    tags: list[str] = field(default_factory=list)  # what the song is, from Claude (see song_cache)
+    cached: bool = False  # decided from what earlier scans learned, not by asking Claude now
 
 
 @dataclass
@@ -78,6 +80,10 @@ class PlaylistRecord:
     updated_at: str  # ISO-8601 UTC
     included: dict[str, SongEntry] = field(default_factory=dict)
     excluded: dict[str, SongEntry] = field(default_factory=dict)
+    # The one song tag this playlist's description amounts to ("k-pop"), or None when it is
+    # subtler than one tag. `topic_known` False: not worked out yet (records made before tags).
+    topic: str | None = None
+    topic_known: bool = False
 
     def checked_ids(self) -> set[str]:
         return set(self.included) | set(self.excluded)
@@ -91,6 +97,7 @@ class PlaylistRecord:
             "updated_at": self.updated_at,
             "included": {k: v.to_dict() for k, v in self.included.items()},
             "excluded": {k: v.to_dict() for k, v in self.excluded.items()},
+            **({"topic": self.topic} if self.topic_known else {}),
         }
 
     @classmethod
@@ -103,4 +110,6 @@ class PlaylistRecord:
             updated_at=d["updated_at"],
             included={k: SongEntry.from_dict(v) for k, v in d.get("included", {}).items()},
             excluded={k: SongEntry.from_dict(v) for k, v in d.get("excluded", {}).items()},
+            topic=d.get("topic") if isinstance(d.get("topic"), str) else None,
+            topic_known="topic" in d,
         )

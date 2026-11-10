@@ -587,9 +587,11 @@ function wire() {
       const name = $("name").value.trim();
       if (!description) { $("desc").focus(); throw new Error("Describe which songs belong in the playlist."); }
       if (!name) { $("name").focus(); throw new Error("Give the playlist a name."); }
-      await api("/api/playlists", { method: "POST", body: { name, description } });
+      const recheck = $("recheck").checked;
+      await api("/api/playlists", { method: "POST", body: { name, description, recheck } });
       $("desc").value = "";
       $("name").value = "";
+      $("recheck").checked = false;
       await poll();
     });
   });

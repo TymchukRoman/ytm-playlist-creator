@@ -76,7 +76,8 @@ def test_command_disables_tools_and_sends_prompt_on_stdin():
 def test_schema_is_valid_json_with_expected_shape():
     schema = json.loads(claude_cli.SCHEMA_JSON)
     item = schema["properties"]["decisions"]["items"]
-    assert item["required"] == ["n", "verdict", "reason"]
+    assert item["required"] == ["n", "verdict", "reason", "tags"]
+    assert item["properties"]["tags"] == {"type": "array", "items": {"type": "string"}}
     assert item["properties"]["verdict"]["enum"] == ["include", "exclude", "unsure"]
 
 
@@ -149,7 +150,7 @@ def test_prompt_describes_the_json_shape_for_the_text_fallback():
     runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a"}, {"n": 2, "verdict": "exclude", "reason": "b"}])))
     classifier(runner).classify_batch("d", songs2())
     stdin = runner.calls[0][1]
-    assert '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"..."}]}' in stdin
+    assert '{"decisions":[{"n":<int>,"verdict":"include|exclude|unsure","reason":"...","tags":["..."]}]}' in stdin
 
 
 @pytest.mark.parametrize("structured", ["not an object", {"other": 1}, {"decisions": "nope"}, None])
@@ -393,3 +394,65 @@ def test_chosen_model_and_effort_are_passed_and_reread_each_call():
     first, second = runner.calls[0][0], runner.calls[1][0]
     assert (_flag(first, "--model"), _flag(first, "--effort")) == ("opus", "max")
     assert _flag(second, "--model") == "haiku" and "--effort" not in second
+
+
+# --- tags per song and the playlist's topic -----------------------------------------------------
+
+def test_tags_are_returned_normalized():
+    runner = FakeRunner(proc(envelope([
+        {"n": 1, "verdict": "include", "reason": "a", "tags": ["Japanese", " Anime  Opening ", "japanese", 7]},
+        {"n": 2, "verdict": "exclude", "reason": "b"},  # tags missing: still a valid answer
+    ])))
+    result = classifier(runner).classify_batch("d", songs2())
+    assert result == [Decision("vid1", "include", "a", ["japanese", "anime opening"]),
+                      Decision("vid2", "exclude", "b", [])]
+
+
+def test_known_tags_are_offered_for_reuse():
+    runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a", "tags": []},
+                                       {"n": 2, "verdict": "include", "reason": "b", "tags": []}])))
+    ClaudeClassifier(runner=runner, executable="claude-exe", known_tags=lambda: ["k-pop", "ukrainian"]).classify_batch(
+        "d", songs2())
+    assert 'Tags already in use (reuse one whenever it means the same): ["k-pop", "ukrainian"]' in runner.calls[0][1]
+
+
+def test_no_known_tags_line_when_cache_is_empty():
+    runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a", "tags": []},
+                                       {"n": 2, "verdict": "include", "reason": "b", "tags": []}])))
+    classifier(runner).classify_batch("d", songs2())
+    assert "Tags already in use" not in runner.calls[0][1]
+
+
+def topic_reply(value) -> str:
+    return json.dumps({"is_error": False, "structured_output": {"topic": value}})
+
+
+def test_topic_for_returns_normalized_tag_and_uses_topic_schema():
+    runner = FakeRunner(proc(topic_reply("K-Pop")))
+    clf = ClaudeClassifier(runner=runner, executable="claude-exe", settings=lambda: ClaudeSettings("opus", "low"))
+    assert clf.topic_for("K-pop songs only", ["k-pop"]) == "k-pop"
+    args, stdin = runner.calls[0]
+    assert _flag(args, "--json-schema") == claude_cli.TOPIC_SCHEMA_JSON
+    assert _flag(args, "--system-prompt") == claude_cli.TOPIC_SYSTEM_PROMPT
+    assert (_flag(args, "--model"), _flag(args, "--effort")) == ("opus", "low")
+    assert "K-pop songs only" in stdin and '["k-pop"]' in stdin
+
+
+@pytest.mark.parametrize("reply", [topic_reply(None), topic_reply(""), topic_reply(5), proc("garbage").stdout])
+def test_topic_for_none_when_no_single_tag_or_unreadable(reply):
+    assert classifier(FakeRunner(proc(reply))).topic_for("Chill songs for rainy evenings", []) is None
+
+
+def test_topic_for_none_on_timeout():
+    def runner(args, stdin_text):
+        raise subprocess.TimeoutExpired(args, 300)
+
+    assert classifier(runner).topic_for("k-pop", []) is None
+
+
+@pytest.mark.parametrize("error_text,error", [("Claude AI usage limit reached", ClaudeUsageLimitError),
+                                              ("Please run /login to authenticate", ClaudeAuthError)])
+def test_topic_for_usage_limit_and_login_errors_still_raise(error_text, error):
+    reply = json.dumps({"is_error": True, "result": error_text})
+    with pytest.raises(error):
+        classifier(FakeRunner(proc(reply))).topic_for("k-pop", [])

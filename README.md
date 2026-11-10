@@ -86,6 +86,16 @@ These details let the app act as you on YouTube Music, so treat them like a pass
 
 ![The main screen with a finished playlist and its Update button](docs/images/main-screen.png)
 
+### Each playlist makes the next one faster
+
+Every scan also notes a few tags for each song, such as its language, genre and what it is (`k-pop`, `japanese`, `anime opening`). The app remembers which songs fit, or surely don't fit, each simple topic it has scanned for.
+
+When a new playlist's description is one simple topic, like *"K-pop songs only"* or *"Songs sung in Ukrainian"*, songs that earlier scans already settled for that topic are sorted right away. Claude is only asked about the rest. Those songs still appear on the review screen, with the reason *"An earlier scan tagged it …"* or *"An earlier scan found it isn't …"*, so you can still change them. Ticking one of them corrects what the app remembers.
+
+Descriptions that combine things or depend on taste, like *"Ukrainian rock from the 2000s"* or *"Chill songs for rainy evenings"*, always ask Claude about every song.
+
+If earlier answers look wrong, tick **Ask Claude about every song again** before pressing **Create**.
+
 ### Choosing the Claude model and effort
 
 Under the playlist name, open **Claude: Sonnet, default effort** to pick the model and effort. Your choice is saved and used for every playlist from then on, including Update.
@@ -123,6 +133,8 @@ Inside:
 - `youtube_auth.json` is your YouTube Music sign-in.
 - `playlists/` holds the app's records of the playlists it made (this is how Update knows what it has already checked).
 - `job.json` is the state of the current or last run, so it can continue after a pause.
+- `songs.json` is what earlier scans learned about each song (tags, and which topics it surely isn't).
+- `settings.json` holds your Claude model and effort choice.
 
 **To disconnect your YouTube Music account**, press **Disconnect** at the bottom of the main screen (or close the app and delete `youtube_auth.json`). The app shows the setup screen again. To sign out everywhere, you can also sign out of YouTube in your browser. To wipe everything the app remembers, delete the whole `yt-music-sorter` folder. Playlists already created on YouTube Music stay there.
 

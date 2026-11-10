@@ -874,3 +874,16 @@ def test_settings_put_from_another_site_is_blocked(env):
                        headers={"Origin": "https://evil.example"})
     assert r.status_code == 403
     assert env.client.get("/api/settings").json()["model"] == "sonnet"
+
+
+def test_create_passes_recheck(env, monkeypatch):
+    seen = {}
+
+    def start_create(name, description, recheck=False):
+        seen["args"] = (name, description, recheck)
+
+    monkeypatch.setattr(env.runner, "start_create", start_create)
+    assert env.client.post("/api/playlists", json={"name": "A", "description": "b", "recheck": True}).status_code == 200
+    assert seen["args"] == ("A", "b", True)
+    env.client.post("/api/playlists", json={"name": "A", "description": "b"})
+    assert seen["args"] == ("A", "b", False)
