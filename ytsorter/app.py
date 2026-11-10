@@ -182,6 +182,9 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
 
     @app.post("/api/youtube/disconnect")
     def disconnect():
+        current = runner.current()
+        if current is not None and current.status in ("running", "applying"):
+            return _error(409, "Wait for the current job to finish or cancel it first.")
         ytm.disconnect()
         return {"connected": False}
 

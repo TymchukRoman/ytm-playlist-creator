@@ -20,10 +20,14 @@ You do not need to install Python or anything else yourself. The start script do
 
 ## Download
 
-1. On this page, click the green **Code** button, then **Download ZIP**.
+1. On the [project page](https://github.com/TymchukRoman/ytm-playlist-creator), click the green **Code** button, then **Download ZIP**.
 2. Unzip it (on Windows: right-click the file, then **Extract All**).
 
-If you use git, you can run `git clone` on this repository instead.
+If you use git, you can clone it instead:
+
+```
+git clone https://github.com/TymchukRoman/ytm-playlist-creator.git
+```
 
 ## Start
 
@@ -111,7 +115,7 @@ Inside:
 - `playlists/` holds the app's records of the playlists it made (this is how Update knows what it has already checked).
 - `job.json` is the state of the current or last run, so it can continue after a pause.
 
-**To disconnect your YouTube Music account**, close the app and delete `youtube_auth.json`. The next start shows the setup screen again. To sign out everywhere, you can also sign out of YouTube in your browser. To wipe everything the app remembers, delete the whole `yt-music-sorter` folder. Playlists already created on YouTube Music stay there.
+**To disconnect your YouTube Music account**, press **Disconnect** at the bottom of the main screen (or close the app and delete `youtube_auth.json`). The app shows the setup screen again. To sign out everywhere, you can also sign out of YouTube in your browser. To wipe everything the app remembers, delete the whole `yt-music-sorter` folder. Playlists already created on YouTube Music stay there.
 
 ## Updating the app
 
@@ -123,10 +127,16 @@ Download the ZIP again (or run `git pull`) and unzip it anywhere, even over the 
 This is Windows SmartScreen, which warns about any downloaded script. Click **More info**, then **Run anyway**. You can open `start.bat` in Notepad first to see what it does: it installs uv if needed and starts the app.
 
 **The window closed, or shows an error.**
-On Windows, the window stays open when something goes wrong, so you can read it. Check your internet connection and try again. If it keeps happening, take a screenshot of the window and ask for help in this project's Issues on GitHub.
+On Windows, the window stays open when something goes wrong, so you can read it. Check your internet connection and try again. If it keeps happening, take a screenshot of the window and ask for help in this project's [Issues on GitHub](https://github.com/TymchukRoman/ytm-playlist-creator/issues).
 
 **"YouTube Music sign-in expired".**
 The details you pasted do not last forever (they also stop working after you sign out of YouTube). Press **Reconnect YouTube Music** and repeat the YouTube Music steps above. The work done so far is kept, and you can press **Resume** afterwards.
+
+**"Claude took too long to answer" or "Claude's answer couldn't be read".**
+A one-off hiccup. The run pauses and keeps the finished work. Press **Resume** to try again.
+
+**"Your Claude Code is too old for this app".**
+Open a terminal and run `claude update`, then press **Check again**.
 
 **"Claude usage limit reached".**
 Your Claude subscription has a limit on how much you can use in a period. The run pauses and **keeps the finished work**. Come back later and press **Resume**. It continues where it stopped, even after closing the app.

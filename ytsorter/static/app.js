@@ -550,6 +550,16 @@ function wire() {
     await poll();
   }));
 
+  $("btn-disconnect").addEventListener("click", (e) => {
+    if (!window.confirm("Disconnect YouTube Music? The app forgets your sign-in on this computer. "
+        + "Your playlists and the app's list of them stay, and you can connect again any time.")) return;
+    act(e.currentTarget, "account-error", async () => {
+      await api("/api/youtube/disconnect", { method: "POST" });
+      await loadStatus(false);
+      render();
+    });
+  });
+
   $("btn-progress-cancel").addEventListener("click", (e) => {
     // Classifying can simply stop; while songs are being written, make sure it is meant.
     if (state.job && state.job.status === "applying"

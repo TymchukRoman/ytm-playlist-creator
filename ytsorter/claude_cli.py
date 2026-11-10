@@ -14,6 +14,7 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 UNANSWERED_REASON = "Claude didn't answer for this song"
 UNREADABLE_MSG = "Claude's answer couldn't be read. Your progress is saved — press Resume to try again."
+TIMEOUT_MSG = "Claude took too long to answer. Your progress is saved — press Resume to try again."
 TOO_OLD_MSG = "Your Claude Code is too old for this app. Run `claude update`, then try again."
 LOGIN_STEPS = "Open a terminal, run `claude`, and log in"
 NOT_LOGGED_IN_MSG = f"Claude isn't logged in. {LOGIN_STEPS}, then press Check again."
@@ -43,6 +44,10 @@ class ClaudeError(Exception):
     """The Claude CLI failed or returned something unusable."""
 
 
+class ClaudeTemporaryError(ClaudeError):
+    """A hiccup worth retrying later (unreadable answer, timeout): the job pauses, not fails."""
+
+
 class ClaudeUsageLimitError(ClaudeError):
     """The Claude usage / rate limit was hit."""
 
@@ -66,6 +71,7 @@ def default_runner(args: list[str], stdin_text: str, timeout: float = CLASSIFY_T
         input=stdin_text,
         capture_output=True,
         encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         cwd=paths.claude_work_dir(),
     )
@@ -104,9 +110,14 @@ def _parse_json_text(text: str) -> object | None:
     return None
 
 
+def _looks_too_old(text: str) -> bool:
+    """An older Claude Code doesn't know one of the options or commands this app uses."""
+    lowered = text.lower()
+    return "unknown option" in lowered or "unknown command" in lowered
+
+
 def _raise_if_too_old(text: str) -> None:
-    """An older Claude Code doesn't know one of the options this app passes."""
-    if "unknown option" in text.lower():
+    if _looks_too_old(text):
         raise ClaudeError(TOO_OLD_MSG)
 
 
@@ -174,7 +185,7 @@ class ClaudeClassifier:
         try:
             return self._runner(args, stdin_text)
         except subprocess.TimeoutExpired as e:
-            raise ClaudeError("Claude CLI timed out") from e
+            raise ClaudeTemporaryError(TIMEOUT_MSG) from e
         except OSError as e:
             raise ClaudeError(f"Could not run the Claude CLI: {e}") from e
 
@@ -191,6 +202,8 @@ class ClaudeClassifier:
         info = _parse_json_text(proc.stdout or "")
         if isinstance(info, dict) and info.get("loggedIn") is True:
             return ClaudeStatus(True, True, "Claude is logged in.")
+        if not isinstance(info, dict) and _looks_too_old(f"{proc.stderr or ''} {proc.stdout or ''}"):
+            return ClaudeStatus(True, False, TOO_OLD_MSG)
         return ClaudeStatus(True, False, NOT_LOGGED_IN_MSG)
 
     def _ask(self, exe: str, description: str, songs: list[Song]) -> dict[int, tuple[str, str]]:
@@ -209,7 +222,7 @@ class ClaudeClassifier:
 
         Songs Claude skipped (or a wholly unusable reply) are retried once; any still
         missing become `unsure` (UNANSWERED_REASON). If not one song got a real answer,
-        ClaudeError(UNREADABLE_MSG) is raised instead, so the job stops for a Resume rather
+        ClaudeTemporaryError(UNREADABLE_MSG) is raised instead, so the job stops for a Resume rather
         than filling the review with guesses. CLI error envelopes (usage limit, auth) raise
         immediately.
         """
@@ -229,7 +242,7 @@ class ClaudeClassifier:
             if not pending:
                 break
         if not decided:
-            raise ClaudeError(UNREADABLE_MSG)
+            raise ClaudeTemporaryError(UNREADABLE_MSG)
 
         return [
             Decision(song.video_id, *decided[i]) if i in decided else Decision(song.video_id, "unsure", UNANSWERED_REASON)

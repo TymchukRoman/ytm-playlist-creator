@@ -118,7 +118,10 @@ class YTMusicClient:
     def create_playlist(self, name: str, description: str) -> str:
         api = self._client()
         try:
-            result = api.create_playlist(name, description, privacy_status="PRIVATE")
+            # YouTube Music rejects < and > (checked for the name before Claude runs); the
+            # description shown on YouTube just drops them.
+            safe_description = description.replace("<", "").replace(">", "")
+            result = api.create_playlist(name, safe_description, privacy_status="PRIVATE")
         except Exception as exc:
             raise _translate(exc) from exc
         if not isinstance(result, str) or not result:

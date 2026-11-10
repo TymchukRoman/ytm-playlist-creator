@@ -9,6 +9,7 @@ from ytsorter.claude_cli import (
     ClaudeClassifier,
     ClaudeError,
     ClaudeStatus,
+    ClaudeTemporaryError,
     ClaudeUsageLimitError,
 )
 from ytsorter.fakes import FakeClassifier
@@ -133,6 +134,7 @@ def test_everything_unparseable_twice_raises_instead_of_all_unsure():
     with pytest.raises(ClaudeError) as exc:
         classifier(runner).classify_batch("d", songs2())
     assert str(exc.value) == UNREADABLE_MSG
+    assert isinstance(exc.value, ClaudeTemporaryError)  # the job pauses for Resume
     assert not isinstance(exc.value, (ClaudeAuthError, ClaudeUsageLimitError))
     assert len(runner.calls) == 2
 
@@ -243,7 +245,7 @@ def test_timeout_raises_claude_error():
     def runner(args, stdin_text):
         raise subprocess.TimeoutExpired(args, 300)
 
-    with pytest.raises(ClaudeError, match="timed out"):
+    with pytest.raises(ClaudeTemporaryError, match="took too long"):
         classifier(runner).classify_batch("d", songs2())
 
 
@@ -354,3 +356,10 @@ class TestFakeClassifier:
         fake.classify_batch("x", songs2())
         with pytest.raises(ClaudeUsageLimitError):
             fake.classify_batch("x", songs2())
+
+
+@pytest.mark.parametrize("output", ["error: unknown command 'auth'", "error: unknown option '--json'"])
+def test_status_old_claude_code_says_update(output):
+    status = classifier(FakeRunner(proc("", returncode=1, stderr=output))).status()
+    assert status.installed is True and status.logged_in is False
+    assert "claude update" in status.message

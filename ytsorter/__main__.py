@@ -1,7 +1,9 @@
 """Launcher: serve the app on 127.0.0.1 and open it in the default browser.
 
 Only one copy runs per data folder: a second start opens the running one instead, because
-two job runners on the same saved job could add songs twice.
+two job runners on the same saved job could add songs twice. An OS file lock decides which
+copy runs (the OS releases it when the process ends, even after a crash); instance.json only
+tells a second start where the running copy is.
 """
 import json
 import os
@@ -22,6 +24,7 @@ from .store import read_json, write_json_atomic
 HOST = "127.0.0.1"  # local only: never reachable from other machines
 DEFAULT_PORT = 8765
 ANSWER_TIMEOUT = 30.0  # /api/status may wait for the Claude sign-in check (up to 20 s)
+FIND_RUNNING_FOR = 30.0  # how long a second start waits for the running copy to answer
 
 
 def pick_port(preferred: int = DEFAULT_PORT) -> int:
@@ -86,10 +89,38 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def lock_file(demo: bool) -> Path:
+    return instance_file(demo).with_name("instance.lock")
+
+
+def acquire_lock(path: Path):
+    """Take the one-copy lock without waiting. Returns the open file holding it (keep it open
+    while the app runs), or None when another copy holds it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+b")  # noqa: SIM115 — must stay open for the lock's lifetime
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 127.0.0.1 never via a proxy
+
+
 def app_answers(port: int, timeout: float = ANSWER_TIMEOUT) -> bool:
     """Whether this app (not some other program) answers GET /api/status on `port`."""
     try:
-        with urllib.request.urlopen(f"{_url(port)}api/status", timeout=timeout) as resp:
+        with _NO_PROXY.open(f"{_url(port)}api/status", timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (OSError, ValueError):
         return False
@@ -143,15 +174,31 @@ def _open_browser_when_ready(server: uvicorn.Server, url: str) -> None:
         webbrowser.open(url)
 
 
+def find_running(marker: Path, wait: float = FIND_RUNNING_FOR) -> str | None:
+    """The running copy's URL, waiting a little in case it is still starting."""
+    deadline = time.monotonic() + wait
+    while True:
+        url = running_instance_url(marker, pid_alive, app_answers)
+        if url or time.monotonic() >= deadline:
+            return url
+        time.sleep(0.5)
+
+
 def main() -> None:
     open_browser = not os.environ.get("YTSORTER_NO_BROWSER")
-    marker = instance_file(demo=os.environ.get("YTSORTER_DEMO") == "1")
-    running = running_instance_url(marker, pid_alive, app_answers)
-    if running:
-        print(f"YT Music Sorter is already running at {running}"
-              + (" — opening it in your browser." if open_browser else ". Use that one."), flush=True)
-        if open_browser:
-            webbrowser.open(running)
+    demo = os.environ.get("YTSORTER_DEMO") == "1"
+    marker = instance_file(demo)
+    lock = acquire_lock(lock_file(demo))
+    if lock is None:  # another copy runs (or is starting) with this data folder
+        running = find_running(marker)
+        if running:
+            print(f"YT Music Sorter is already running at {running}"
+                  + (" — opening it in your browser." if open_browser else ". Use that one."), flush=True)
+            if open_browser:
+                webbrowser.open(running)
+        else:
+            print("YT Music Sorter is already running in another window, but it isn't answering. "
+                  "Close the other window, then start the app again.", flush=True)
         return
 
     port = pick_port()
@@ -166,6 +213,7 @@ def main() -> None:
         server.run()
     finally:
         remove_instance(marker)
+        lock.close()
 
 
 if __name__ == "__main__":

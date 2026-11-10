@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from .classify import BATCH_SIZE, classify_pending
-from .claude_cli import UNANSWERED_REASON, ClaudeAuthError, ClaudeUsageLimitError
+from .claude_cli import UNANSWERED_REASON, ClaudeAuthError, ClaudeTemporaryError, ClaudeUsageLimitError
 from .models import Decision, PlaylistRecord, Song, SongEntry
 from .store import JobStore, RecordStore
 from .ytm import PlaylistMissingError, YouTubeAuthError
@@ -34,6 +34,8 @@ FETCH_MSG = "Fetching your liked songs…"
 CLASSIFY_MSG = "Asking Claude which songs fit…"
 NAME_MAX = 150  # YouTube Music's limit for a playlist title
 BAD_NAME_MSG = "Playlist names can't contain < or > and must be 150 characters or fewer."
+DESCRIPTION_MAX = 5000  # YouTube Music's limit for a playlist description
+BAD_DESCRIPTION_MSG = "Keep the description to 5,000 characters or fewer."
 JOB_WORKING_MSG = "A job is working right now — wait for it to finish or cancel it first."
 IN_JOB_MSG = "This playlist is part of the current job — finish or cancel that first."
 
@@ -42,6 +44,12 @@ def check_playlist_name(name: str) -> None:
     """Raise ValueError for a name YouTube Music would refuse (only at approve time, otherwise)."""
     if "<" in name or ">" in name or len(name) > NAME_MAX:
         raise ValueError(BAD_NAME_MSG)
+
+
+def check_playlist_description(description: str) -> None:
+    """Raise ValueError for a description YouTube Music would refuse when creating the playlist."""
+    if len(description) > DESCRIPTION_MAX:
+        raise ValueError(BAD_DESCRIPTION_MSG)
 
 
 def missing_playlist_message(name: str) -> str:
@@ -217,6 +225,7 @@ class JobRunner:
 
     def start_create(self, name: str, description: str) -> Job:
         check_playlist_name(name)
+        check_playlist_description(description)
         return self._start("create", [Target(None, name, description)])
 
     def start_update(self, playlist_ids: list[str]) -> Job:
@@ -385,6 +394,8 @@ class JobRunner:
             self._stop(job, "paused", USAGE_LIMIT_MSG)
         except ClaudeAuthError:
             self._stop(job, "paused", CLAUDE_AUTH_MSG)
+        except ClaudeTemporaryError as exc:
+            self._stop(job, "paused", str(exc))
         except YouTubeAuthError:
             self._stop(job, "paused", YOUTUBE_AUTH_MSG)
         except _PlaylistGone as gone:

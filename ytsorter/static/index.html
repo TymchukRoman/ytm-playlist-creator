@@ -125,7 +125,7 @@
         <p class="lead">Describe what belongs in it. Claude goes through your liked songs and picks the ones that fit.
           You see the list and choose before anything is created.</p>
         <label for="desc">Which songs should be in it?</label>
-        <textarea id="desc" rows="3" placeholder="e.g. Anime openings only — no endings or soundtracks"></textarea>
+        <textarea id="desc" rows="3" maxlength="5000" placeholder="e.g. Anime openings only — no endings or soundtracks"></textarea>
         <label for="name">Playlist name</label>
         <input id="name" type="text" maxlength="150" autocomplete="off">
         <p class="error" id="create-error" role="alert" hidden></p>
@@ -142,6 +142,12 @@
         <ul class="playlist-list" id="playlist-list"></ul>
         <p class="empty" id="playlists-empty" hidden>No playlists yet. Describe your first one above and press Create.</p>
       </section>
+
+      <footer class="account">
+        <p class="hint">Connected to YouTube Music.
+          <button type="button" class="link-btn" id="btn-disconnect">Disconnect</button></p>
+        <p class="error" id="account-error" role="alert" hidden></p>
+      </footer>
     </section>
 
     <!-- Progress -->

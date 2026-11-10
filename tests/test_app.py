@@ -729,7 +729,7 @@ def test_app_answers_only_for_this_app():
     assert launcher.app_answers(closed, timeout=2) is False
 
 
-def test_second_start_opens_the_running_app_and_exits(monkeypatch, capsys, tmp_path):
+def test_second_start_opens_the_running_app_and_exits(monkeypatch, capsys, tmp_path, request):
     monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("YTSORTER_DEMO", raising=False)
     monkeypatch.delenv("YTSORTER_NO_BROWSER", raising=False)
@@ -744,6 +744,9 @@ def test_second_start_opens_the_running_app_and_exits(monkeypatch, capsys, tmp_p
 
     monkeypatch.setattr(launcher.uvicorn, "Server", no_server)
     monkeypatch.setattr(launcher, "build_default_app", no_server)
+    held = launcher.acquire_lock(launcher.lock_file(demo=False))  # "the other copy"
+    assert held is not None
+    request.addfinalizer(held.close)
     launcher.main()
     assert "already running at http://127.0.0.1:9001/" in capsys.readouterr().out
     assert opened == ["http://127.0.0.1:9001/"]
@@ -789,3 +792,53 @@ def test_shutdown_leaves_another_instances_file_alone(tmp_path):
     marker.write_text(json.dumps({"pid": 4242, "port": 9001}), encoding="utf-8")
     launcher.remove_instance(marker)
     assert marker.exists()
+
+
+def test_lock_is_exclusive_and_released_on_close(tmp_path):
+    path = tmp_path / "instance.lock"
+    first = launcher.acquire_lock(path)
+    assert first is not None
+    assert launcher.acquire_lock(path) is None  # a second copy can't take it
+    first.close()
+    again = launcher.acquire_lock(path)
+    assert again is not None
+    again.close()
+
+
+def test_second_start_with_silent_holder_explains_and_exits(monkeypatch, capsys, tmp_path, request):
+    monkeypatch.setenv("YTSORTER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("YTSORTER_DEMO", raising=False)
+    monkeypatch.setenv("YTSORTER_NO_BROWSER", "1")
+    held = launcher.acquire_lock(launcher.lock_file(demo=False))
+    request.addfinalizer(held.close)
+
+    def no_server(*a, **k):
+        raise AssertionError("a second server must not start")
+
+    monkeypatch.setattr(launcher.uvicorn, "Server", no_server)
+    monkeypatch.setattr(launcher, "find_running", lambda marker: None)
+    launcher.main()
+    assert "isn't answering" in capsys.readouterr().out
+
+
+def test_app_answers_ignores_system_proxy(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # a dead proxy
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    ours = _serve(json.dumps({"claude": {}, "youtube": {}, "demo": False}).encode())
+    try:
+        assert launcher.app_answers(ours.server_address[1], timeout=5) is True
+    finally:
+        ours.shutdown()
+
+
+def test_disconnect_refused_while_a_job_works(tmp_path):
+    env = Env(tmp_path)
+    env.runner._run_in_background = lambda fn: None  # job stays "running"
+    env.client.post("/api/playlists", json={"name": "A", "description": "b"})
+    r = env.client.post("/api/youtube/disconnect")
+    assert r.status_code == 409 and r.json()["error"]
+    assert env.ytm.is_connected()
+    env.runner.cancel()
+    assert env.client.post("/api/youtube/disconnect").json() == {"connected": False}

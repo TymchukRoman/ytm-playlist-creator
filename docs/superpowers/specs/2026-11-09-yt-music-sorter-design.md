@@ -1,7 +1,7 @@
 # YT Music Sorter — Design
 
 Date: 2026-11-09
-Status: draft, awaiting approval
+Status: approved 2026-11-09
 
 ## Intent
 

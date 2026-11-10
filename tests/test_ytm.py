@@ -283,3 +283,9 @@ def test_get_playlist_video_ids_other_errors_translate(tmp_path):
 
 def test_client_has_no_remove_methods():
     assert not any(n.startswith(("remove", "delete", "unlike", "rate")) for n in dir(YTMusicClient))
+
+
+def test_create_playlist_drops_angle_brackets_from_description(tmp_path):
+    api = FakeApi()
+    make_client(tmp_path, api).create_playlist("Name", "songs I <3, no -> covers")
+    assert api.created[0]["description"] == "songs I 3, no - covers"

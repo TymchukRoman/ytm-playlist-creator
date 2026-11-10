@@ -875,3 +875,26 @@ def test_skipped_missing_playlist_survives_pause_and_resume(stores):
     runner.resume()
     job = runner.current()
     assert job.status == "review" and job.missing_playlist_id == "PL1"
+
+
+def test_unreadable_claude_answer_pauses_for_resume(stores):
+    from ytsorter.claude_cli import UNREADABLE_MSG, ClaudeTemporaryError
+
+    class Garbled(FakeClassifier):
+        def classify_batch(self, description, batch):
+            raise ClaudeTemporaryError(UNREADABLE_MSG)
+
+    runner = make_runner(stores, FakeYTMusic(songs("a")), Garbled())
+    runner.start_create("Rock", "rock")
+    job = runner.current()
+    assert (job.status, job.error) == ("paused", UNREADABLE_MSG)
+
+
+def test_start_create_rejects_a_description_over_5000_characters(stores):
+    clf = RecordingClassifier()
+    runner = make_runner(stores, FakeYTMusic(songs("a")), clf)
+    with pytest.raises(ValueError, match="5,000"):
+        runner.start_create("Rock", "x" * 5001)
+    assert runner.current() is None and clf.sent == []
+    runner.start_create("Rock", "x" * 5000)
+    assert runner.current().status == "review"
