@@ -289,3 +289,78 @@ def test_create_playlist_drops_angle_brackets_from_description(tmp_path):
     api = FakeApi()
     make_client(tmp_path, api).create_playlist("Name", "songs I <3, no -> covers")
     assert api.created[0]["description"] == "songs I 3, no - covers"
+
+
+# --- what the user pastes: raw headers or Chrome / Edge "Copy as cURL" -------------------------
+
+from ytsorter.ytm import CURL_HELP, headers_from_paste  # noqa: E402
+
+CURL_BASH = r"""curl 'https://music.youtube.com/youtubei/v1/browse?prettyPrint=false' \
+  -H 'accept: */*' \
+  -H 'authorization: SAPISIDHASH 1700000000_abc123' \
+  -H 'content-type: application/json' \
+  -b 'SID=abc; __Secure-3PAPISID=xyz/AbC; PREF=f6=40000000&tz=Europe.Kyiv' \
+  -H 'x-goog-authuser: 0' \
+  -H 'x-origin: https://music.youtube.com' \
+  --data-raw $'{"context":{"client":{"hl":"uk","note":"it\'s"}},"browseId":"FEmusic_home"}'"""
+
+CURL_CMD = (
+    'curl ^"https://music.youtube.com/youtubei/v1/browse?prettyPrint=false^" ^\r\n'
+    '  -H ^"accept: */*^" ^\r\n'
+    '  -H ^"authorization: SAPISIDHASH 1700000000_abc123^" ^\r\n'
+    '  -b ^"SID=abc; __Secure-3PAPISID=xyz/AbC; PREF=f6=40000000^&tz=Europe.Kyiv^" ^\r\n'
+    '  -H ^"x-goog-authuser: 0^" ^\r\n'
+    r'  --data-raw ^"^{^\^"context^\^":^{^}^}^"'
+)
+
+EXPECTED = (
+    "accept: */*\n"
+    "authorization: SAPISIDHASH 1700000000_abc123\n"
+    "content-type: application/json\n"
+    "cookie: SID=abc; __Secure-3PAPISID=xyz/AbC; PREF=f6=40000000&tz=Europe.Kyiv\n"
+    "x-goog-authuser: 0\n"
+    "x-origin: https://music.youtube.com"
+)
+
+
+def test_paste_curl_bash_becomes_header_lines():
+    assert headers_from_paste(CURL_BASH) == EXPECTED
+
+
+def test_paste_curl_bash_with_windows_line_endings():
+    assert headers_from_paste(CURL_BASH.replace("\n", "\r\n")) == EXPECTED
+
+
+def test_paste_curl_cmd_becomes_header_lines():
+    assert headers_from_paste(CURL_CMD) == (
+        "accept: */*\n"
+        "authorization: SAPISIDHASH 1700000000_abc123\n"
+        "cookie: SID=abc; __Secure-3PAPISID=xyz/AbC; PREF=f6=40000000&tz=Europe.Kyiv\n"
+        "x-goog-authuser: 0"
+    )
+
+
+def test_paste_raw_headers_pass_through_unchanged():
+    raw = "accept: */*\ncookie: SID=abc\nx-goog-authuser: 0"
+    assert headers_from_paste("\n" + raw + "\n") == raw
+
+
+@pytest.mark.parametrize("bad", ["curl 'https://music.youtube.com/' -H 'unclosed", "curl 'https://x/'"])
+def test_paste_unreadable_curl_raises_help(bad):
+    with pytest.raises(ValueError) as exc:
+        headers_from_paste(bad)
+    assert str(exc.value) == CURL_HELP
+
+
+def test_connect_with_curl_passes_header_lines_to_setup(tmp_path, monkeypatch):
+    calls = patch_setup(monkeypatch)
+    YTMusicClient(tmp_path / "auth.json", factory=lambda path: FakeApi()).connect(CURL_BASH)
+    assert calls == [(None, EXPECTED)]
+
+
+def test_connect_with_unreadable_curl_says_how_to_copy(tmp_path, monkeypatch):
+    calls = patch_setup(monkeypatch)
+    client = YTMusicClient(tmp_path / "auth.json", factory=lambda path: FakeApi())
+    with pytest.raises(YouTubeAuthError, match=r"Copy as cURL \(bash\)"):
+        client.connect("curl 'https://x/'")
+    assert calls == [] and list(tmp_path.iterdir()) == []

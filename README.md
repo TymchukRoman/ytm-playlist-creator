@@ -59,7 +59,7 @@ The app connects to your YouTube Music account by using a few details your brows
 2. Press `F12` to open the developer tools. On a Mac, press `Cmd`+`Option`+`I`.
 3. Click the **Network** tab at the top of the developer tools.
 4. Type `browse` into the filter box. If the list stays empty, click **Home** or **Library** on the YouTube Music page.
-5. Right-click the first request in the list, then choose **Copy**, then **Copy request headers**.
+5. Right-click the first request in the list, then choose **Copy**, then **Copy as cURL (bash)**.
 6. Paste them into the box in the app (`Ctrl`+`V`, or `Cmd`+`V` on a Mac) and press **Connect**.
 
 **Firefox**

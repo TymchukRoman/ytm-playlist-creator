@@ -516,7 +516,7 @@ function wire() {
     act($("btn-connect"), "connect-error", async () => {
       if (!$("headers").value.trim()) {
         $("headers").focus();
-        throw new Error("Paste the request headers from your browser first.");
+        throw new Error("Paste what you copied from your browser first.");
       }
       await api("/api/youtube/connect", { method: "POST", body: { headers: $("headers").value } });
       $("headers").value = "";

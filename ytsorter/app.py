@@ -173,7 +173,7 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
     @app.post("/api/youtube/connect")
     def connect(body: ConnectBody):
         if not body.headers.strip():
-            return _error(400, "Paste the request headers from your browser first.")
+            return _error(400, "Paste what you copied from your browser first.")
         try:
             ytm.connect(body.headers)
         except YouTubeAuthError as exc:

@@ -80,7 +80,7 @@
                 <li data-slot="chrome-4">Type <code>browse</code> into the filter box.
                   If the list stays empty, click <strong>Home</strong> or <strong>Library</strong> on the YouTube Music page.</li>
                 <li data-slot="chrome-5">Right-click the first request in the list, then choose
-                  <strong>Copy</strong> and then <strong>Copy request headers</strong>.</li>
+                  <strong>Copy</strong> and then <strong>Copy as cURL (bash)</strong>.</li>
                 <li data-slot="chrome-6">Paste them into the box below (<kbd>Ctrl</kbd>+<kbd>V</kbd>,
                   or <kbd>Cmd</kbd>+<kbd>V</kbd> on a Mac) and press <strong>Connect</strong>.</li>
               </ol>
@@ -103,7 +103,7 @@
             </div>
 
             <form id="connect-form" class="connect" novalidate>
-              <label for="headers">Paste the request headers here</label>
+              <label for="headers">Paste what you copied here</label>
               <textarea id="headers" rows="7" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
               <p class="note">These details let this app act as you on YouTube Music. They stay on this computer only.</p>
               <p class="error" id="connect-error" role="alert" hidden></p>

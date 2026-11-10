@@ -6,6 +6,7 @@ sign-in file.
 """
 import os
 import re
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,43 @@ class PlaylistMissingError(YouTubeError):
     """The playlist no longer exists on YouTube Music."""
 
 
+CURL_HELP = ("That copied command couldn't be read. In the Network tab, right-click the request, "
+             "choose Copy, then Copy as cURL (bash), and paste it again.")
+_DATA_RE = re.compile(r"\s--data(?:-raw|-binary|-urlencode)?|\s-d\s")
+
+
+def headers_from_paste(text: str) -> str:
+    """Turn what the user pasted into "name: value" header lines for ytmusicapi.
+
+    Accepts raw request headers (Firefox "Copy Request Headers", Chrome's Raw view) as they
+    are, and Chrome / Edge "Copy as cURL" in its bash or cmd form: the -H headers plus the
+    -b cookie. Raises ValueError(CURL_HELP) for a cURL command that can't be read.
+    """
+    text = text.strip()
+    if not text.lower().startswith("curl"):
+        return text
+    if '^"' in text:  # cURL (cmd): ^ escapes every special character, ^ + newline continues
+        text = re.sub(r"\^\r?\n", " ", text)
+        text = re.sub(r"\^(.)", r"\1", text)
+    text = re.sub(r"\\\r?\n", " ", text)  # bash line continuations
+    data = _DATA_RE.search(text)
+    if data:  # the request body comes after the headers and may use quoting shlex can't read
+        text = text[: data.start()]
+    try:
+        tokens = shlex.split(text)
+    except ValueError as exc:
+        raise ValueError(CURL_HELP) from exc
+    lines = []
+    for flag, value in zip(tokens, tokens[1:]):
+        if flag in ("-H", "--header"):
+            lines.append(value)
+        elif flag in ("-b", "--cookie"):
+            lines.append(f"cookie: {value}")
+    if not lines:
+        raise ValueError(CURL_HELP)
+    return "\n".join(lines)
+
+
 def _translate(exc: Exception) -> Exception:
     if isinstance(exc, YouTubeError | YouTubeAuthError):
         return exc
@@ -52,6 +90,10 @@ class YTMusicClient:
 
     def connect(self, headers_raw: str) -> None:
         """Verify new credentials in a temp file; only replace the saved sign-in on success."""
+        try:
+            headers_raw = headers_from_paste(headers_raw)
+        except ValueError as exc:
+            raise YouTubeAuthError(str(exc)) from exc
         tmp = self.auth_file.with_name(self.auth_file.name + ".new")
         try:
             content = ytmusicapi.setup(headers_raw=headers_raw)
@@ -61,8 +103,8 @@ class YTMusicClient:
         except Exception as exc:
             tmp.unlink(missing_ok=True)
             raise YouTubeAuthError(
-                "Those sign-in details didn't work. Copy the request headers again from your "
-                "browser while signed in to music.youtube.com."
+                "Those sign-in details didn't work. Make sure you are signed in to music.youtube.com, "
+                "then copy a \"browse\" request again and paste it here."
             ) from exc
         self._api = None  # rebuilt from the new credentials on next use
 
