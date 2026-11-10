@@ -181,7 +181,7 @@ main { max-width: 760px; margin: 0 auto; padding: 16px 16px 64px; }
 .link-btn:disabled { opacity: 0.5; }
 
 label { display: block; font-weight: 650; }
-textarea, input[type="text"] {
+textarea, input[type="text"], select {
   display: block;
   width: 100%;
   margin-top: 6px;
@@ -193,7 +193,7 @@ textarea, input[type="text"] {
   padding: 12px 14px;
 }
 textarea { resize: vertical; }
-textarea:focus, input[type="text"]:focus { border-color: var(--violet); outline: none; background: var(--surface); }
+textarea:focus, input[type="text"]:focus, select:focus { border-color: var(--violet); outline: none; background: var(--surface); }
 ::placeholder { color: var(--muted); opacity: 0.85; }
 
 .row-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
@@ -266,6 +266,17 @@ textarea:focus, input[type="text"]:focus { border-color: var(--violet); outline:
 
 .create > label { margin-top: 20px; }
 .create .btn-big { margin-top: 24px; }
+.claude-choice { margin-top: 20px; }
+.claude-choice summary { cursor: pointer; color: var(--muted); font-weight: 600; width: fit-content; }
+.claude-choice summary span { color: var(--ink); }
+.choice-body { margin-top: 12px; display: grid; gap: 12px; }
+.choice-field { display: grid; gap: 6px; align-content: start; }
+.choice-field .hint:empty { display: none; }
+.choice-field .hint { margin: 0; }
+@media (min-width: 640px) {
+  .choice-body { grid-template-columns: 1fr 1fr; }
+  .choice-body > p { grid-column: 1 / -1; margin: 0; }
+}
 
 .playlists { padding-top: 12px; }
 .account { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); }

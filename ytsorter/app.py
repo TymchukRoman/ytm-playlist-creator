@@ -25,7 +25,8 @@ from .claude_cli import ClaudeClassifier
 from .fakes import FakeYTMusic
 from .jobs import Job, JobBusyError, JobRunner, JobStateError, Target
 from .models import Song
-from .paths import data_dir, job_file, playlists_dir, youtube_auth_file
+from .paths import data_dir, job_file, playlists_dir, settings_file, youtube_auth_file
+from .settings import BAD_SETTINGS_MSG, ClaudeSettings, SettingsStore, options_json
 from .store import JobStore, RecordStore
 from .ytm import YouTubeAuthError, YTMusicClient
 
@@ -47,6 +48,11 @@ class CreateBody(BaseModel):
 
 class ApproveBody(BaseModel):
     video_ids: list[str]
+
+
+class SettingsBody(BaseModel):
+    model: str
+    effort: str
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -108,7 +114,8 @@ def _same_origin_ok(request: Request) -> bool:
 
 
 def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo: bool = False,
-               clock: Callable[[], float] = time.monotonic) -> FastAPI:
+               clock: Callable[[], float] = time.monotonic, settings: SettingsStore | None = None) -> FastAPI:
+    settings = settings or SettingsStore(None)
     app = FastAPI(title="YT Music Sorter", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -187,6 +194,21 @@ def create_app(runner: JobRunner, ytm, classifier, records: RecordStore, *, demo
             return _error(409, "Wait for the current job to finish or cancel it first.")
         ytm.disconnect()
         return {"connected": False}
+
+    # --- Claude model and effort ---------------------------------------------------------------
+
+    @app.get("/api/settings")
+    def get_settings():
+        return {**dataclasses.asdict(settings.load()), **options_json()}
+
+    @app.put("/api/settings")
+    def put_settings(body: SettingsBody):
+        try:
+            choice = ClaudeSettings(body.model, body.effort)
+        except ValueError:
+            return _error(400, BAD_SETTINGS_MSG)
+        settings.save(choice)
+        return dataclasses.asdict(choice)
 
     # --- playlists ----------------------------------------------------------------------------
 
@@ -283,9 +305,11 @@ def build_default_app() -> FastAPI:
         base = data_dir() / "demo"
         shutil.rmtree(base, ignore_errors=True)  # demo only: records must match the fresh fake library
         records, jobs = RecordStore(base / "playlists"), JobStore(base / "job.json")
+        settings = SettingsStore(base / "settings.json")
         ytm, classifier = FakeYTMusic(list(demo_data.SAMPLE_SONGS)), demo_data.DemoClassifier()
     else:
         records, jobs = RecordStore(playlists_dir()), JobStore(job_file())
-        ytm, classifier = YTMusicClient(youtube_auth_file()), ClaudeClassifier()
+        settings = SettingsStore(settings_file())
+        ytm, classifier = YTMusicClient(youtube_auth_file()), ClaudeClassifier(settings=settings.load)
     runner = JobRunner(records, jobs, ytm, classifier)  # real background threads
-    return create_app(runner, ytm, classifier, records, demo=demo)
+    return create_app(runner, ytm, classifier, records, demo=demo, settings=settings)

@@ -86,6 +86,15 @@ These details let the app act as you on YouTube Music, so treat them like a pass
 
 ![The main screen with a finished playlist and its Update button](docs/images/main-screen.png)
 
+### Choosing the Claude model and effort
+
+Under the playlist name, open **Claude: Sonnet, default effort** to pick the model and effort. Your choice is saved and used for every playlist from then on, including Update.
+
+- **Model:** Haiku is the fastest and uses the least of your Claude limit. Sonnet (the default) is a good balance. Opus and Fable judge subtle playlists more carefully but use more of your limit.
+- **Effort:** how long Claude thinks about each batch. **Default** lets Claude Code decide. Higher effort is slower and uses more of your limit.
+
+For a big library, start with Sonnet. Switch to Opus or raise the effort only if Claude puts too many songs in "Unsure" or gets them wrong.
+
 ### Adding songs you liked later
 
 Each playlist the app made appears under **Your playlists** with an **Update** button. Update looks only at the songs you liked since the last time, asks Claude about those, and shows you the same review screen. **Update all** does this for every playlist, one after another. Songs you already decided on are never asked about again, and your choices on the review screen are final.

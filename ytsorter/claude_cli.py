@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from . import paths
 from .models import Decision, Song
+from .settings import ClaudeSettings
 
 # runner(args, stdin_text) for a classify call; runner(args, stdin_text, timeout=...) for the status check.
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -173,10 +174,12 @@ def _valid_decisions(raw: list, count: int) -> dict[int, tuple[str, str]]:
 
 
 class ClaudeClassifier:
-    def __init__(self, runner: Runner = default_runner, executable: str | None = None, model: str = "sonnet"):
+    def __init__(self, runner: Runner = default_runner, executable: str | None = None, model: str = "sonnet",
+                 settings: Callable[[], ClaudeSettings] | None = None):
+        """`settings`, when given, is read on every call, so a changed choice applies to the next batch."""
         self._runner = runner
         self._executable = executable
-        self._model = model
+        self._settings = settings or (lambda: ClaudeSettings(model))
 
     def _exe(self) -> str | None:
         return self._executable or shutil.which("claude")
@@ -208,11 +211,14 @@ class ClaudeClassifier:
 
     def _ask(self, exe: str, description: str, songs: list[Song]) -> dict[int, tuple[str, str]]:
         """One CLI call for `songs`; returns decisions keyed by 1-based position (possibly empty)."""
+        choice = self._settings()
         args = [
             exe, "-p", "--tools", "", "--no-session-persistence", "--output-format", "json",
-            "--model", self._model, "--system-prompt", SYSTEM_PROMPT, "--json-schema", SCHEMA_JSON,
+            "--model", choice.model, "--system-prompt", SYSTEM_PROMPT, "--json-schema", SCHEMA_JSON,
             "--setting-sources", "project", "--strict-mcp-config",
         ]  # fmt: skip
+        if choice.effort != "default":
+            args += ["--effort", choice.effort]
         proc = self._run(args, _build_prompt(description, songs))
         raw = _extract_decisions(proc)
         return _valid_decisions(raw, len(songs)) if raw is not None else {}

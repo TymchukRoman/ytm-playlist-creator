@@ -842,3 +842,35 @@ def test_disconnect_refused_while_a_job_works(tmp_path):
     assert env.ytm.is_connected()
     env.runner.cancel()
     assert env.client.post("/api/youtube/disconnect").json() == {"connected": False}
+
+
+# --- Claude model and effort --------------------------------------------------------------------
+
+def test_settings_get_lists_choices_and_current(env):
+    body = env.client.get("/api/settings").json()
+    assert (body["model"], body["effort"]) == ("sonnet", "default")
+    assert [m["id"] for m in body["models"]] == ["haiku", "sonnet", "opus", "fable"]
+    assert [e["id"] for e in body["efforts"]] == ["default", "low", "medium", "high", "xhigh", "max"]
+    assert all(m["label"] for m in body["models"])
+
+
+def test_settings_put_saves_choice(env):
+    r = env.client.put("/api/settings", json={"model": "opus", "effort": "max"})
+    assert r.status_code == 200 and r.json() == {"model": "opus", "effort": "max"}
+    body = env.client.get("/api/settings").json()
+    assert (body["model"], body["effort"]) == ("opus", "max")
+
+
+@pytest.mark.parametrize("payload", [{"model": "gpt", "effort": "low"}, {"model": "opus", "effort": "turbo"},
+                                     {"model": "opus"}])
+def test_settings_put_rejects_unknown_choices(env, payload):
+    r = env.client.put("/api/settings", json=payload)
+    assert r.status_code == 400 and r.json()["error"]
+    assert env.client.get("/api/settings").json()["model"] == "sonnet"
+
+
+def test_settings_put_from_another_site_is_blocked(env):
+    r = env.client.put("/api/settings", json={"model": "opus", "effort": "max"},
+                       headers={"Origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert env.client.get("/api/settings").json()["model"] == "sonnet"

@@ -363,3 +363,33 @@ def test_status_old_claude_code_says_update(output):
     status = classifier(FakeRunner(proc("", returncode=1, stderr=output))).status()
     assert status.installed is True and status.logged_in is False
     assert "claude update" in status.message
+
+
+# --- the user's model and effort choice ---------------------------------------------------------
+
+from ytsorter.settings import ClaudeSettings  # noqa: E402
+
+
+def _flag(args, name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def test_default_choice_is_sonnet_without_effort_flag():
+    runner = FakeRunner(proc(envelope([{"n": 1, "verdict": "include", "reason": "a"},
+                                       {"n": 2, "verdict": "include", "reason": "b"}])))
+    classifier(runner).classify_batch("d", songs2())
+    args = runner.calls[0][0]
+    assert _flag(args, "--model") == "sonnet" and "--effort" not in args
+
+
+def test_chosen_model_and_effort_are_passed_and_reread_each_call():
+    choice = [ClaudeSettings("opus", "max")]
+    reply = envelope([{"n": 1, "verdict": "include", "reason": "a"}, {"n": 2, "verdict": "include", "reason": "b"}])
+    runner = FakeRunner(proc(reply), proc(reply))
+    clf = ClaudeClassifier(runner=runner, executable="claude-exe", settings=lambda: choice[0])
+    clf.classify_batch("d", songs2())
+    choice[0] = ClaudeSettings("haiku", "default")
+    clf.classify_batch("d", songs2())
+    first, second = runner.calls[0][0], runner.calls[1][0]
+    assert (_flag(first, "--model"), _flag(first, "--effort")) == ("opus", "max")
+    assert _flag(second, "--model") == "haiku" and "--effort" not in second

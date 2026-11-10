@@ -128,6 +128,27 @@
         <textarea id="desc" rows="3" maxlength="5000" placeholder="e.g. Anime openings only — no endings or soundtracks"></textarea>
         <label for="name">Playlist name</label>
         <input id="name" type="text" maxlength="150" autocomplete="off">
+
+        <details class="claude-choice" id="claude-choice" hidden>
+          <summary>Claude: <span id="claude-choice-summary"></span></summary>
+          <div class="choice-body">
+            <div class="choice-field">
+              <label for="claude-model">Model</label>
+              <select id="claude-model"></select>
+              <p class="hint" id="claude-model-hint"></p>
+            </div>
+            <div class="choice-field">
+              <label for="claude-effort">Effort</label>
+              <select id="claude-effort"></select>
+              <p class="hint" id="claude-effort-hint"></p>
+            </div>
+            <p class="hint">Used for every playlist from now on, including Update. A bigger model or more effort
+              can judge subtle playlists better, but is slower and uses more of your Claude limit.</p>
+            <p class="ok-msg" id="claude-choice-ok" role="status" hidden></p>
+            <p class="error" id="claude-choice-error" role="alert" hidden></p>
+          </div>
+        </details>
+
         <p class="error" id="create-error" role="alert" hidden></p>
         <button type="submit" class="btn btn-primary btn-big" id="btn-create">Create</button>
       </form>

@@ -26,6 +26,10 @@ def job_file() -> Path:
     return data_dir() / "job.json"
 
 
+def settings_file() -> Path:
+    return data_dir() / "settings.json"
+
+
 def claude_work_dir() -> Path:
     """An empty folder used as the Claude CLI's working directory (created on demand)."""
     path = data_dir() / "claude-work"

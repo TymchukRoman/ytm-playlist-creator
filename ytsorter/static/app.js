@@ -105,6 +105,55 @@ const missing = loadMissing();
 
 // --- loading data ---------------------------------------------------------------------------
 
+let claudeChoice = null; // GET /api/settings: {model, effort, models:[...], efforts:[...]}
+
+function optionById(list, id) {
+  return list.find((o) => o.id === id) || { label: id, hint: "" };
+}
+
+function renderClaudeChoice() {
+  const c = claudeChoice;
+  if (!c) return;
+  for (const [kind, list] of [["model", c.models], ["effort", c.efforts]]) {
+    const select = $(`claude-${kind}`);
+    if (!select.options.length) {
+      for (const o of list) {
+        const option = el("option", null, o.label);
+        option.value = o.id;
+        select.append(option);
+      }
+    }
+    select.value = c[kind];
+    $(`claude-${kind}-hint`).textContent = optionById(list, c[kind]).hint;
+  }
+  const effort = c.effort === "default" ? "default effort" : `${optionById(c.efforts, c.effort).label.toLowerCase()} effort`;
+  $("claude-choice-summary").textContent = `${optionById(c.models, c.model).label}, ${effort}`;
+  $("claude-choice").hidden = false;
+}
+
+async function loadClaudeChoice() {
+  try {
+    claudeChoice = await api("/api/settings");
+  } catch {
+    return; // the picker just stays hidden; Create still works with the saved choice
+  }
+  renderClaudeChoice();
+}
+
+async function saveClaudeChoice(select) {
+  await act(select, "claude-choice-error", async () => {
+    showMessage("claude-choice-ok", "");
+    const body = { model: $("claude-model").value, effort: $("claude-effort").value };
+    try {
+      const saved = await api("/api/settings", { method: "PUT", body });
+      Object.assign(claudeChoice, saved);
+      showMessage("claude-choice-ok", "Saved.");
+    } finally {
+      renderClaudeChoice(); // on failure, show the choice that is really saved
+    }
+  });
+}
+
 async function loadStatus(refresh) {
   state.status = await api(refresh ? "/api/status?refresh=1" : "/api/status");
   $("demo-banner").hidden = !state.status.demo;
@@ -545,6 +594,10 @@ function wire() {
     });
   });
 
+  for (const kind of ["model", "effort"]) {
+    $(`claude-${kind}`).addEventListener("change", (e) => saveClaudeChoice(e.currentTarget));
+  }
+
   $("btn-update-all").addEventListener("click", (e) => act(e.currentTarget, "playlists-error", async () => {
     await api("/api/update-all", { method: "POST" });
     await poll();
@@ -629,6 +682,7 @@ function wire() {
 async function start() {
   wire();
   setupGuideImages();
+  loadClaudeChoice();
   try {
     await Promise.all([loadStatus(false), loadJob(), loadPlaylists()]);
   } catch (err) {
