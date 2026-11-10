@@ -30,7 +30,7 @@ _VERDICTS = ("include", "exclude", "unsure")
 SYSTEM_PROMPT = (
     "You sort a user's liked songs into a playlist they described. "
     "Judge only from the metadata given for each song and your own knowledge of the music. "
-    "Many Japanese, Korean and Chinese songs are anime, drama or game theme songs: use what you know "
+    "Many songs are theme songs or soundtracks for films, TV series, anime or games: use what you know "
     "about tie-ins, including romanized or translated titles. "
     "If you cannot tell whether a song fits, answer 'unsure' rather than guess. "
     "Keep each reason to 15 words or fewer. "
@@ -47,7 +47,7 @@ SCHEMA_JSON = (
 TOPIC_SYSTEM_PROMPT = (
     "You turn a playlist description into a single song tag, or none. "
     "A tag names what a song is, like a language, a genre, a country, or a kind of song "
-    "such as 'anime opening'. Answer with only the JSON object asked for."
+    "such as 'movie soundtrack'. Answer with only the JSON object asked for."
 )
 TOPIC_SCHEMA_JSON = '{"type":"object","properties":{"topic":{"type":["string","null"]}},"required":["topic"]}'
 
@@ -105,7 +105,7 @@ def _build_prompt(description: str, songs: list[Song], known_tags: list[str] = (
         "For each numbered song below, decide whether it belongs in that playlist "
         "(include, exclude or unsure) and give a short reason. "
         "Also give 1 to 6 short lowercase tags describing the song itself, whatever the playlist: "
-        "its language, genre, origin and kind (for example 'japanese', 'j-rock', 'anime opening', 'naruto'). "
+        "its language, genre, origin and kind (for example 'spanish', 'indie rock', 'movie soundtrack', 'christmas song'). "
         "Leave tags empty for a song you don't know.\n"
         f"{_known_tags_line(list(known_tags))}"
         f"Answer with only a JSON object of this exact shape: {_JSON_SHAPE}\n"
@@ -263,7 +263,7 @@ class ClaudeClassifier:
             f"Playlist description: {description}\n"
             f"{_known_tags_line(list(known_tags))}"
             "If the songs that fit this description are exactly the songs with one tag (for example "
-            "'k-pop', 'ukrainian', 'anime opening'), answer that tag, reusing a tag already in use when it "
+            "'jazz', 'spanish', 'christmas song'), answer that tag, reusing a tag already in use when it "
             "means the same. If the description combines conditions, leaves things out, or depends on mood, "
             "era, tempo or taste, answer null.\n"
             'Answer with only a JSON object of this exact shape: {"topic": "<tag>" or null}'
